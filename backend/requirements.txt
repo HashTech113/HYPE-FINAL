@@ -1,0 +1,32 @@
+# Single source of truth for backend runtime deps. Dev tooling
+# (pytest / ruff / pyright) is intentionally NOT listed here so
+# production installs stay minimal. Install with:
+#   pip install -r backend/requirements.txt
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+# Switched from opencv-contrib-python to opencv-python for InsightFace
+# compatibility — confirmed no contrib-only API in this codebase.
+opencv-python==4.10.0.84
+# numpy 2.x is required by current insightface deps (albumentations 2.x,
+# scikit-image 0.26+); previous pin to 1.26 conflicts with the resolver.
+numpy>=2.0,<3
+# Face recognition stack (Path B). InsightFace's buffalo_l model is
+# downloaded into FACE_MODEL_ROOT on first use (~300 MB).
+insightface==0.7.3
+onnxruntime==1.20.1
+Pillow==11.0.0
+requests==2.32.3
+pydantic==2.9.2
+python-multipart==0.0.12
+bcrypt==4.2.0
+PyJWT==2.9.0
+cryptography==43.0.3
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+python-dateutil==2.9.0
+openpyxl==3.1.5
+slowapi==0.1.9
+# ONVIF GetStreamUri fallback inside services.cameras.smart_probe — used
+# when a camera's RTSP path doesn't match any brand template (common for
+# OEM rebrands like CP Plus CP-UNC series). Adds zeep + lxml as transitives.
+onvif-zeep==0.2.12

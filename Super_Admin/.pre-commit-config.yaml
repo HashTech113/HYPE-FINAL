@@ -1,0 +1,48 @@
+# Pre-commit hooks. Install once with `pre-commit install` from the
+# repo root; subsequent commits run these checks automatically.
+#
+# Philosophy: catch the highest-cost mistakes (committed secrets,
+# broken syntax, unformatted code) before they reach origin. Don't
+# block on stylistic nits.
+
+repos:
+  # Generic safety net first — these are < 100ms and catch the
+  # mistakes that ruin a Friday afternoon (committed AWS keys, broken
+  # JSON / YAML, accidentally-merged conflict markers).
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+        exclude: \.md$
+      - id: check-yaml
+        exclude: ^\.github/workflows/  # GH workflow YAML uses tags pre-commit doesn't know
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # Ruff: lint + format. `ruff` does the lint pass, `ruff-format`
+  # mirrors black. Both are file-scoped so unstaged files aren't
+  # touched.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+
+  # Detect committed secrets. Generic regex is too noisy; gitleaks
+  # has a curated rule set tuned to real-world leak patterns
+  # (AWS / Stripe / GitHub tokens, RSA keys, etc.).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

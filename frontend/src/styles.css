@@ -1,0 +1,349 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --animate-fade-in: fade-in 0.4s ease-out;
+  --animate-fade-in-up: fade-in-up 0.5s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+  --animate-slide-in-left: slide-in-left 0.3s ease-out;
+}
+
+:root {
+  --radius: 0.625rem;
+  /* Neumorphic surface palette — soft gray base so cards lift via dual shadows */
+  --background: oklch(0.965 0.002 250);
+  --foreground: oklch(0.24 0.022 228);
+  --card: oklch(0.985 0.001 250);
+  --card-foreground: oklch(0.24 0.022 228);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.24 0.022 228);
+  --primary: oklch(0.62 0.14 172);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.008 205);
+  --secondary-foreground: oklch(0.35 0.03 216);
+  --muted: oklch(0.95 0.008 210);
+  --muted-foreground: oklch(0.52 0.02 222);
+  --accent: oklch(0.94 0.022 175);
+  --accent-foreground: oklch(0.30 0.048 175);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.91 0.010 215);
+  --input: oklch(0.91 0.010 215);
+  --ring: oklch(0.62 0.14 172);
+  --chart-1: oklch(0.62 0.14 172);
+  --chart-2: oklch(0.76 0.13 158);
+  --chart-3: oklch(0.66 0.08 215);
+  --chart-4: oklch(0.80 0.15 88);
+  --chart-5: oklch(0.67 0.15 43);
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.52 0.02 222);
+  --sidebar-primary: oklch(0.62 0.14 172);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.94 0.018 178);
+  --sidebar-accent-foreground: oklch(0.29 0.05 178);
+  --sidebar-border: oklch(0.92 0.01 210);
+  --sidebar-ring: oklch(0.62 0.14 172);
+  --success: oklch(0.63 0.17 155);
+  --success-foreground: oklch(1 0 0);
+  --warning: oklch(0.82 0.14 87);
+  --warning-foreground: oklch(0.28 0.05 85);
+}
+
+.dark {
+  --background: oklch(0.13 0.03 260);
+  --foreground: oklch(0.98 0.005 250);
+  --card: oklch(0.18 0.03 260);
+  --card-foreground: oklch(0.98 0.005 250);
+  --popover: oklch(0.18 0.03 260);
+  --popover-foreground: oklch(0.98 0.005 250);
+  --primary: oklch(0.746 0.16 232);
+  --primary-foreground: oklch(0.13 0.03 260);
+  --secondary: oklch(0.25 0.03 260);
+  --secondary-foreground: oklch(0.90 0.01 250);
+  --muted: oklch(0.25 0.03 260);
+  --muted-foreground: oklch(0.65 0.03 255);
+  --accent: oklch(0.25 0.03 260);
+  --accent-foreground: oklch(0.90 0.01 250);
+  --destructive: oklch(0.65 0.22 25);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.30 0.03 260);
+  --input: oklch(0.30 0.03 260);
+  --ring: oklch(0.746 0.16 232);
+  --chart-1: oklch(0.746 0.16 232);
+  --chart-2: oklch(0.65 0.18 160);
+  --chart-3: oklch(0.70 0.15 300);
+  --chart-4: oklch(0.80 0.16 85);
+  --chart-5: oklch(0.65 0.20 30);
+  --sidebar: oklch(0.18 0.03 260);
+  --sidebar-foreground: oklch(0.90 0.01 250);
+  --sidebar-primary: oklch(0.746 0.16 232);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.25 0.03 260);
+  --sidebar-accent-foreground: oklch(0.90 0.01 250);
+  --sidebar-border: oklch(0.30 0.03 260);
+  --sidebar-ring: oklch(0.746 0.16 232);
+  --success: oklch(0.65 0.18 145);
+  --success-foreground: oklch(1 0 0);
+  --warning: oklch(0.80 0.16 85);
+  --warning-foreground: oklch(0.25 0.05 85);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    font-family: "Poppins", "Nunito Sans", "Segoe UI", sans-serif;
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes cursor-float {
+  0%, 100% { transform: translateY(0); opacity: 0.9; }
+  50% { transform: translateY(-2px); opacity: 1; }
+}
+
+.attendance-cursor-float {
+  animation: cursor-float 2s ease-in-out infinite;
+}
+
+/* Auth screen transitions — paired slide-in animations used between the
+   role-selection screen and the role-specific login forms. */
+@keyframes auth-slide-from-right {
+  from { opacity: 0; transform: translateX(32px) scale(0.99); filter: blur(2px); }
+  to   { opacity: 1; transform: translateX(0)    scale(1);    filter: blur(0); }
+}
+
+@keyframes auth-slide-from-left {
+  from { opacity: 0; transform: translateX(-32px) scale(0.99); filter: blur(2px); }
+  to   { opacity: 1; transform: translateX(0)     scale(1);    filter: blur(0); }
+}
+
+.animate-auth-from-right {
+  animation: auth-slide-from-right 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-auth-from-left {
+  animation: auth-slide-from-left 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-auth-from-right,
+  .animate-auth-from-left {
+    animation: fade-in 240ms ease-out both;
+  }
+}
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Opt-in override: when an ancestor has .show-scrollbar, descendants stop
+   hiding their scrollbar and render a thin styled one instead. Lets shared
+   scroll containers (e.g. ui/table.tsx) be hidden by default but visible
+   on pages that ask for it. */
+.show-scrollbar .scrollbar-hidden,
+.show-scrollbar.scrollbar-hidden {
+  -ms-overflow-style: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
+}
+
+.show-scrollbar .scrollbar-hidden::-webkit-scrollbar,
+.show-scrollbar.scrollbar-hidden::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  display: block;
+}
+
+.show-scrollbar .scrollbar-hidden::-webkit-scrollbar-track,
+.show-scrollbar.scrollbar-hidden::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.show-scrollbar .scrollbar-hidden::-webkit-scrollbar-thumb,
+.show-scrollbar.scrollbar-hidden::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.6);
+  border-radius: 9999px;
+}
+
+.show-scrollbar .scrollbar-hidden::-webkit-scrollbar-thumb:hover,
+.show-scrollbar.scrollbar-hidden::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(100, 116, 139, 0.8);
+}
+
+/* Search dropdown menus should stay scrollable but keep scrollbars visually
+   hidden for a cleaner filter UI, regardless of parent scrollbar policies. */
+.search-dropdown-scrollbar-hidden {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+.search-dropdown-scrollbar-hidden::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+}
+
+/* Dashboard widgets: line-draw animation for Presence Trend chart */
+@keyframes drawLine {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.dashboard-chart .recharts-line-curve {
+  stroke-dasharray: 1500;
+  stroke-dashoffset: 1500;
+  animation: drawLine 1.2s ease forwards;
+}
+
+/* Flat surfaces — shadows removed site-wide per design direction.
+   Class names retained so existing components keep working without churn,
+   but the neumorphic dual-shadow effect is intentionally a no-op. */
+@layer components {
+  .neu-surface {
+    background-color: var(--color-card);
+    transition: transform 250ms ease-in-out;
+  }
+
+  .neu-surface-hover:hover {
+    transform: translateY(-4px);
+  }
+
+  .neu-inset {
+    background-color: var(--color-background);
+  }
+
+  .neu-pill {
+    background-color: var(--color-card);
+    border-radius: 9999px;
+    transition: transform 200ms ease-in-out;
+  }
+}
+
+/* Flip card — used by the Discipline Score widget to swap between
+   per-team scores (front) and a live carousel of recognized snapshots
+   (back). The front face is in normal flow so it dictates the card's
+   height; the back face is absolutely positioned so it never grows
+   the card beyond the front face's natural size. */
+.flip-card {
+  perspective: 1500px;
+  height: 100%;
+}
+
+.flip-card-inner {
+  position: relative;
+  height: 100%;
+  transform-style: preserve-3d;
+  -webkit-transform-style: preserve-3d;
+  transition: transform 0.7s cubic-bezier(0.4, 0.2, 0.2, 1);
+}
+
+.flip-card-inner.is-flipped {
+  transform: rotateY(180deg);
+}
+
+.flip-card-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flip-card-front {
+  height: 100%;
+}
+
+.flip-card-back {
+  position: absolute;
+  inset: 0;
+  transform: rotateY(180deg);
+}
+
+/* Global shadow kill-switch — nullifies Tailwind shadow utilities
+   (shadow, shadow-sm, shadow-md, shadow-xl, shadow-[arbitrary], etc.)
+   so existing className strings don't have to be edited individually. */
+*,
+*::before,
+*::after {
+  --tw-shadow: 0 0 #0000;
+  --tw-shadow-colored: 0 0 #0000;
+}
+[class~="shadow"],
+[class*=" shadow-"],
+[class^="shadow-"] {
+  box-shadow: none !important;
+}

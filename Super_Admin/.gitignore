@@ -1,0 +1,109 @@
+# =============================================================================
+# Project-wide .gitignore — covers backend (Python), frontend (Next.js), and
+# Hr-Dashboard (Vite). Tuned to make it impossible to accidentally commit
+# secrets, PII (face photos), or anything that should be regenerated locally.
+# =============================================================================
+
+# ---------- Secrets — NEVER commit ----------
+# Catch every shape: .env, .env.local, .env.production, foo.env,
+# foo.env.local, env_files/whatever.env, etc. The catch-all `*.env`
+# rule covers the pattern we found in `ai_attendance_migration/`
+# where the file was named `backend.env` (not `.env`).
+.env
+.env.local
+.env.*.local
+*.env
+*.env.local
+*.env.production
+env_files/
+**/env_files/
+**/backend/.env
+**/frontend/.env.local
+**/Hr-Dashboard/.env
+
+# ---------- PII — face images / event snapshots / unknown captures ----------
+# These contain real people's faces. Even an accidental push is a privacy
+# breach. The whole storage/ tree is excluded everywhere.
+storage/
+**/storage/
+
+# ---------- Logs ----------
+logs/
+**/logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Python ----------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Node / package managers ----------
+node_modules/
+.pnpm-store/
+.yarn/cache/
+.yarn/install-state.gz
+
+# ---------- Next.js ----------
+.next/
+out/
+.vercel/
+
+# ---------- Vite / generic build output ----------
+dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+
+# ---------- IDE / editor cruft ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Database dumps / backups ----------
+*.dump
+*.bak
+*.sql.gz
+*.tar.gz
+*.zip
+*.7z
+
+# ---------- Local test/scratch scripts ----------
+_module*_smoke.py
+_*_smoke.py
+scratch/
+sandbox/
+
+# ---------- OS / package metadata that varies per machine ----------
+.cache/
+.parcel-cache/
+
+# ---------- AI assistant local state (per-machine) ----------
+.claude/
+
+# ---------- Migration / backup scratch (per-machine, contains
+# unrelated Claude transcripts and DB dumps — never commit) ----------
+ai_attendance_migration/
+**/ai_attendance_migration/

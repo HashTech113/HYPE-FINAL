@@ -1,0 +1,92 @@
+[
+  {
+    "id": "1",
+    "name": "Akash",
+    "employeeId": "EMP-001",
+    "company": "Grow",
+    "department": "AI Developer",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "2",
+    "name": "Aswin K",
+    "employeeId": "EMP-002",
+    "company": "Grow",
+    "department": "Automation Engineer",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "3",
+    "name": "Aromal",
+    "employeeId": "EMP-003",
+    "company": "Grow",
+    "department": "AI Developer",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "4",
+    "name": "Akhil C V",
+    "employeeId": "EMP-004",
+    "company": "Grow",
+    "department": "Finance",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "5",
+    "name": "Greeshma Harikumar",
+    "employeeId": "EMP-005",
+    "company": "Owlytics",
+    "department": "Market Research Analyst",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "6",
+    "name": "Vaishnavi",
+    "employeeId": "EMP-006",
+    "company": "Owlytics",
+    "department": "Accounts & Operations",
+    "shift": "09:30-18:33",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "7",
+    "name": "Maria",
+    "employeeId": "EMP-007",
+    "company": "Perform100x",
+    "department": "Sales",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "8",
+    "name": "Ambika B Menon",
+    "employeeId": "EMP-008",
+    "company": "Owlytics",
+    "department": "HR",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  },
+  {
+    "id": "9",
+    "name": "Sharif",
+    "employeeId": "EM-009",
+    "company": "Grow",
+    "department": "Project Manager",
+    "shift": "09:30-18:30",
+    "role": "Employee",
+    "dob": ""
+  }
+]

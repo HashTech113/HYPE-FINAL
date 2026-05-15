@@ -1,0 +1,139 @@
+# Backend unit tests — run on every push and PR. Catches the
+# regressions the next agent (or human) would otherwise re-introduce.
+#
+# Why only unit tests here:
+#   * Fast (<5s) so feedback is immediate.
+#   * No external infra (DB, RTSP cameras, GPU) needed.
+#   * Covers the high-risk pure-Python logic: JWT, ciphers, camera
+#     URL building, recognition, atomic writes, rate limiting, bus
+#     drop accounting.
+#
+# Integration / soak / load tests live in a separate workflow once
+# we have a docker-postgres fixture in place.
+
+name: Backend Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-tests.yml"
+
+# Cancel any in-flight run when a fresher commit arrives — saves CI
+# minutes and stops slow PRs from blocking the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Static-analysis job runs first because it's seconds-fast — we
+  # want lint failures to surface before paying the test install +
+  # run cost. The `unit` job depends on this so a lint failure
+  # blocks the whole pipeline.
+  lint:
+    name: Lint + format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install ruff (only)
+        # Ruff alone — no need for the full dev requirements just
+        # to run a lint pass. Saves ~30s per CI run.
+        run: pip install "ruff>=0.7,<1"
+
+      - name: ruff check
+        run: ruff check app tests
+
+      - name: ruff format --check
+        run: ruff format --check app tests
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    needs: [lint]
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install deps
+        # Pyright needs the runtime deps to resolve types — installing
+        # only pyright would flag every `from fastapi import ...` as
+        # missing. Reuse the dev requirements (cached).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: pyright
+        # Don't fail the build on warnings yet — we're ratcheting up
+        # strictness directory-by-directory. Errors block.
+        run: pyright --warnings
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [lint]
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          # Cache pip downloads keyed on the dev requirements file.
+          # Swapping requirements busts the cache automatically.
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend deps (dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        # Strict mode + coverage. We don't enforce a coverage floor
+        # yet (would block the very first PR on the new harness);
+        # add `--cov-fail-under=80` later once tests have grown.
+        run: |
+          pytest -m unit \
+            --strict-markers --strict-config \
+            --cov=app --cov-report=term-missing --cov-report=xml \
+            -p no:cacheprovider
+
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          retention-days: 7

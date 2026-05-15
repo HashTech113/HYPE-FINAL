@@ -1,0 +1,131 @@
+{
+  "overview": {
+    "summary": {
+      "totalEmployees": { "value": 2450, "change": "+2.45%" },
+      "presentToday": { "value": 2397, "change": "+1.82%" },
+      "leaveToday": { "value": 14, "change": "+0.58%" },
+      "lateToday": { "value": 8, "change": "+0.33%" }
+    },
+    "attendanceSegments": [
+      { "label": "Present", "value": 78, "color": "#0f9f7f" },
+      { "label": "Leave", "value": 14, "color": "#e74c3c" },
+      { "label": "Late", "value": 8, "color": "#f4c542" }
+    ],
+    "pendingRequests": [
+      { "title": "Recent Request", "time": "Last 3 hours ago" },
+      { "title": "Pending Request", "time": "Last 3 hours ago" },
+      { "title": "Pending Request", "time": "Last 3 hours ago" }
+    ],
+    "charts": {
+      "spentIn": [
+        { "day": "Mon", "primary": 585, "secondary": 575 },
+        { "day": "Tue", "primary": 600, "secondary": 590 },
+        { "day": "Wed", "primary": 590, "secondary": 585 },
+        { "day": "Thu", "primary": 610, "secondary": 600 },
+        { "day": "Fri", "primary": 595, "secondary": 602 },
+        { "day": "Sat", "primary": 620, "secondary": 610 },
+        { "day": "Sun", "primary": 630, "secondary": 618 }
+      ],
+      "spentOut": [
+        { "day": "Mon", "primary": 1080, "secondary": 1060 },
+        { "day": "Tue", "primary": 1050, "secondary": 1035 },
+        { "day": "Wed", "primary": 1020, "secondary": 1010 },
+        { "day": "Thu", "primary": 1090, "secondary": 1055 },
+        { "day": "Fri", "primary": 1040, "secondary": 1030 },
+        { "day": "Sat", "primary": 980, "secondary": 995 },
+        { "day": "Sun", "primary": 930, "secondary": 960 }
+      ],
+      "averagePresent": [
+        { "day": "Mon", "primary": 555, "secondary": 565 },
+        { "day": "Tue", "primary": 560, "secondary": 570 },
+        { "day": "Wed", "primary": 552, "secondary": 566 },
+        { "day": "Thu", "primary": 568, "secondary": 574 },
+        { "day": "Fri", "primary": 571, "secondary": 576 },
+        { "day": "Sat", "primary": 590, "secondary": 585 },
+        { "day": "Sun", "primary": 605, "secondary": 596 }
+      ],
+      "averageAbsent": [
+        { "day": "Mon", "primary": 1035, "secondary": 1015 },
+        { "day": "Tue", "primary": 1020, "secondary": 1008 },
+        { "day": "Wed", "primary": 1015, "secondary": 1005 },
+        { "day": "Thu", "primary": 1045, "secondary": 1022 },
+        { "day": "Fri", "primary": 1038, "secondary": 1018 },
+        { "day": "Sat", "primary": 990, "secondary": 1000 },
+        { "day": "Sun", "primary": 950, "secondary": 970 }
+      ]
+    }
+  },
+  "employees": [
+    { "id": "1", "name": "Akash", "employeeId": "EMP-001", "company": "WAWU", "department": "Engineering", "shift": "08:00-17:00", "role": "Employee", "password": "pass1234", "dob": "1990-03-15" },
+    { "id": "2", "name": "Aswin", "employeeId": "EMP-002", "company": "WAWU", "department": "HR", "shift": "09:00-18:00", "role": "Admin", "password": "admin5678", "dob": "1988-07-22" },
+    { "id": "3", "name": "Aromal", "employeeId": "EMP-003", "company": "WAWU", "department": "Operations", "shift": "07:00-16:00", "role": "Employee", "password": "aro9012", "dob": "1992-11-08" },
+    { "id": "4", "name": "Akhil", "employeeId": "EMP-004", "company": "WAWU", "department": "Finance", "shift": "08:00-17:00", "role": "Employee", "password": "akh3456", "dob": "1995-01-30" },
+    { "id": "5", "name": "Greeshma", "employeeId": "EMP-005", "company": "WAWU", "department": "Security", "shift": "06:00-14:00", "role": "Employee", "password": "gre7890", "dob": "1985-06-12" },
+    { "id": "6", "name": "Vaishnavi", "employeeId": "EMP-006", "company": "WAWU", "department": "Engineering", "shift": "08:00-17:00", "role": "Employee", "password": "vai1234", "dob": "1993-09-25" },
+    { "id": "7", "name": "Maria", "employeeId": "EMP-007", "company": "WAWU", "department": "Logistics", "shift": "07:00-16:00", "role": "Employee", "password": "mar5678", "dob": "1991-04-18" },
+    { "id": "8", "name": "Ambika Menon", "employeeId": "EMP-008", "company": "WAWU", "department": "Marketing", "shift": "09:00-18:00", "role": "Employee", "password": "amb9012", "dob": "1994-12-05" },
+    { "id": "9", "name": "Niharika", "employeeId": "EMP-009", "company": "WAWU", "department": "Support", "shift": "09:00-18:00", "role": "Employee", "password": "nih2468", "dob": "1996-02-14" }
+  ],
+  "presenceHistory": [
+    { "id": "h1", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "08:02", "exitTime": "17:05", "totalHours": "9h 03m", "status": "Present", "date": "2025-04-13" },
+    { "id": "h2", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "08:00", "exitTime": "17:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h3", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "08:10", "exitTime": "17:00", "totalHours": "8h 50m", "status": "Late", "date": "2025-04-11" },
+    { "id": "h4", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "08:00", "exitTime": "17:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-10" },
+    { "id": "h5", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "—", "exitTime": null, "totalHours": "—", "status": "Absent", "date": "2025-04-09" },
+    { "id": "h6", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "08:01", "exitTime": "17:02", "totalHours": "9h 01m", "status": "Present", "date": "2025-04-08" },
+    { "id": "h7", "employeeName": "Akash", "employeeId": "EMP-001", "entryTime": "07:58", "exitTime": "17:00", "totalHours": "9h 02m", "status": "Present", "date": "2025-04-07" },
+    { "id": "h8", "employeeName": "Aswin", "employeeId": "EMP-002", "entryTime": "09:15", "exitTime": "18:00", "totalHours": "8h 45m", "status": "Late", "date": "2025-04-13" },
+    { "id": "h9", "employeeName": "Aswin", "employeeId": "EMP-002", "entryTime": "09:20", "exitTime": "18:00", "totalHours": "8h 40m", "status": "Late", "date": "2025-04-12" },
+    { "id": "h10", "employeeName": "Aswin", "employeeId": "EMP-002", "entryTime": "09:00", "exitTime": "18:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-11" },
+    { "id": "h11", "employeeName": "Aswin", "employeeId": "EMP-002", "entryTime": "09:00", "exitTime": "18:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-10" },
+    { "id": "h12", "employeeName": "Aromal", "employeeId": "EMP-003", "entryTime": "07:00", "exitTime": "14:30", "totalHours": "7h 30m", "status": "Early Exit", "date": "2025-04-13" },
+    { "id": "h13", "employeeName": "Aromal", "employeeId": "EMP-003", "entryTime": "07:00", "exitTime": "16:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h14", "employeeName": "Aromal", "employeeId": "EMP-003", "entryTime": "07:05", "exitTime": "16:00", "totalHours": "8h 55m", "status": "Present", "date": "2025-04-11" },
+    { "id": "h15", "employeeName": "Vaishnavi", "employeeId": "EMP-006", "entryTime": "08:00", "exitTime": "17:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h16", "employeeName": "Vaishnavi", "employeeId": "EMP-006", "entryTime": "08:15", "exitTime": "17:00", "totalHours": "8h 45m", "status": "Late", "date": "2025-04-11" },
+    { "id": "h17", "employeeName": "Greeshma", "employeeId": "EMP-005", "entryTime": "06:00", "exitTime": "14:00", "totalHours": "8h 00m", "status": "Present", "date": "2025-04-13" },
+    { "id": "h18", "employeeName": "Greeshma", "employeeId": "EMP-005", "entryTime": "06:05", "exitTime": "14:00", "totalHours": "7h 55m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h19", "employeeName": "Maria", "employeeId": "EMP-007", "entryTime": "07:05", "exitTime": "16:00", "totalHours": "8h 55m", "status": "Present", "date": "2025-04-13" },
+    { "id": "h20", "employeeName": "Maria", "employeeId": "EMP-007", "entryTime": "—", "exitTime": null, "totalHours": "—", "status": "Absent", "date": "2025-04-12" },
+    { "id": "h21", "employeeName": "Ambika Menon", "employeeId": "EMP-008", "entryTime": "09:00", "exitTime": "18:10", "totalHours": "9h 10m", "status": "Present", "date": "2025-04-13" },
+    { "id": "h22", "employeeName": "Ambika Menon", "employeeId": "EMP-008", "entryTime": "09:05", "exitTime": "18:00", "totalHours": "8h 55m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h23", "employeeName": "Akhil", "employeeId": "EMP-004", "entryTime": "—", "exitTime": null, "totalHours": "—", "status": "Absent", "date": "2025-04-13" },
+    { "id": "h24", "employeeName": "Akhil", "employeeId": "EMP-004", "entryTime": "08:00", "exitTime": "17:00", "totalHours": "9h 00m", "status": "Present", "date": "2025-04-12" },
+    { "id": "h25", "employeeName": "Niharika", "employeeId": "EMP-009", "entryTime": "09:35", "exitTime": "18:00", "totalHours": "8h 25m", "status": "Late", "date": "2025-04-13" },
+    { "id": "h26", "employeeName": "Niharika", "employeeId": "EMP-009", "entryTime": "—", "exitTime": null, "totalHours": "—", "status": "Absent", "date": "2025-04-12" }
+  ],
+  "holidayCalendar": [
+    { "id": "hol-2026-01-01", "date": "2026-01-01", "day": "Thursday", "name": "New Year", "type": "Public Holiday" },
+    { "id": "hol-2026-01-04", "date": "2026-01-04", "day": "Sunday", "name": "Sunday", "type": "Weekly Off" },
+    { "id": "hol-2026-01-11", "date": "2026-01-11", "day": "Sunday", "name": "Sunday", "type": "Weekly Off" },
+    { "id": "hol-2026-01-14", "date": "2026-01-14", "day": "Wednesday", "name": "Maha Sankranti", "type": "Public Holiday" },
+    { "id": "hol-2026-01-18", "date": "2026-01-18", "day": "Sunday", "name": "Sunday", "type": "Weekly Off" },
+    { "id": "hol-2026-01-25", "date": "2026-01-25", "day": "Sunday", "name": "Sunday", "type": "Weekly Off" },
+    { "id": "hol-2026-01-26", "date": "2026-01-26", "day": "Monday", "name": "Republic Day", "type": "Public Holiday" }
+  ],
+  "requests": [
+    { "id": "1", "employeeName": "Akash", "employeeId": "EMP-001", "type": "Leave (Annual)", "message": "Family event, requires 3 days...", "date": "2025-04-10", "status": "Approved" },
+    { "id": "2", "employeeName": "Aswin", "employeeId": "EMP-002", "type": "Attendance Correction", "message": "Punch-out missed on 04/08...", "date": "2025-04-09", "status": "Pending" },
+    { "id": "3", "employeeName": "Aromal", "employeeId": "EMP-003", "type": "Leave (Sick)", "message": "Doctors appointment...", "date": "2025-04-11", "status": "Denied" },
+    { "id": "4", "employeeName": "Akhil", "employeeId": "EMP-004", "type": "Leave (Annual)", "message": "Punch-out requires request", "date": "2025-04-12", "status": "Approved" },
+    { "id": "5", "employeeName": "Greeshma", "employeeId": "EMP-005", "type": "Leave (Annual)", "message": "Punch-out missed on 04/15...", "date": "2025-04-09", "status": "Pending" },
+    { "id": "6", "employeeName": "Vaishnavi", "employeeId": "EMP-006", "type": "Leave (Sick)", "message": "Doctors appointment...", "date": "2025-04-10", "status": "Pending" },
+    { "id": "7", "employeeName": "Maria", "employeeId": "EMP-007", "type": "Leave (Annual)", "message": "Doctors appointment...", "date": "2025-04-10", "status": "Pending" },
+    { "id": "8", "employeeName": "Ambika Menon", "employeeId": "EMP-008", "type": "Shift Change", "message": "Request to change shift to 09:00–18:00", "date": "2025-04-13", "status": "Pending" }
+  ],
+  "alerts": [
+    { "id": "1", "type": "critical", "title": "Unauthorized Entry Detected", "description": "Unknown badge scanned at Gate B — no match in system", "timestamp": "2025-04-13T14:32:00", "employee": "Unknown" },
+    { "id": "2", "type": "warning", "title": "Late Arrival Pattern", "description": "Employee has been late 5 days this week", "timestamp": "2025-04-13T09:20:00", "employee": "Aswin" },
+    { "id": "3", "type": "info", "title": "Shift Change Approved", "description": "Ambika Menon's shift updated to 09:00–18:00", "employee": "Ambika Menon", "timestamp": "2025-04-13T08:00:00" },
+    { "id": "4", "type": "warning", "title": "After-Hours Access", "description": "Greeshma accessed building at 22:45", "employee": "Greeshma", "timestamp": "2025-04-12T22:45:00" },
+    { "id": "5", "type": "critical", "title": "Camera Offline", "description": "Gate C camera offline for 2+ hours", "timestamp": "2025-04-13T12:00:00" },
+    { "id": "6", "type": "info", "title": "New Employee Added", "description": "Maria was added to WAWU – Logistics", "employee": "Maria", "timestamp": "2025-04-12T10:00:00" }
+  ],
+  "alertRules": {
+    "lateThreshold": 10,
+    "earlyExitThreshold": 30,
+    "multipleExitsThreshold": 3,
+    "afterHoursStart": "20:00",
+    "afterHoursEnd": "06:00"
+  }
+}
