@@ -822,8 +822,7 @@ export function FaceTrainingPanel() {
       // the picker resets.
       const empName = selectedEmployee?.name ?? "this employee";
       showSuccess(
-        `Retraining completed successfully for ${empName} — previous ` +
-        "images replaced and new face training images stored successfully.",
+        `Retraining completed for ${empName} — old images replaced with new trained images successfully.`,
       );
       // Leave retrain mode AND return to the initial section state
       // (no employee selected) so the admin can pick the next person
