@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
   Expand,
   MapPin,
   Minimize,
+  PauseCircle,
   RefreshCw,
   UserX,
   Video,
@@ -39,6 +40,52 @@ function isLive(h: CameraHealth | undefined): boolean {
   if (!h.is_running) return false;
   if (h.last_error) return false;
   return h.last_frame_age_seconds !== null && h.last_frame_age_seconds < LIVE_FRAME_AGE_MAX_SECONDS;
+}
+
+// True when this browser tab is foregrounded. Drives both the MJPEG
+// <img> mount and the per-tile detection poll: backgrounded tabs have
+// no business holding open multipart streams or pinging the API every
+// 1.5 s. Belt-and-braces: setInterval is throttled to ≥1 Hz in hidden
+// tabs anyway, but unmounting the <img> is what actually closes the
+// streaming socket.
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState<boolean>(() =>
+    typeof document === "undefined" ? true : !document.hidden,
+  );
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onChange = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  return visible;
+}
+
+// True when the tile is intersecting the viewport (with a small
+// rootMargin so we pre-warm streams just before they scroll into view
+// — avoids a black flash for normal scroll velocity). When false we
+// unmount the <img> so the browser closes the MJPEG connection,
+// stopping bandwidth + JPEG decode for the tile entirely.
+function useInViewport<T extends Element>(ref: RefObject<T | null>): boolean {
+  const [inView, setInView] = useState<boolean>(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      // No IO support — fall back to "always visible" so streams still
+      // work; we lose the optimization but not correctness.
+      setInView(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) setInView(entry.isIntersecting);
+      },
+      { threshold: 0.01, rootMargin: "120px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [ref]);
+  return inView;
 }
 
 function LiveCamerasPage() {
@@ -254,6 +301,13 @@ function CameraTile({ camera, health }: { camera: Camera; health: CameraHealth |
   const pulseTimerRef = useRef<number | null>(null);
   const refreshRef = useRef<number | null>(null);
   const tileRef = useRef<HTMLDivElement | null>(null);
+  // Combined visibility gate: stream + detection-poll only run when the
+  // tab is foregrounded AND the tile itself is in (or near) the
+  // viewport. Off-screen tiles in a long grid stop pulling MJPEG
+  // bytes and stop hitting /detections every 1.5s.
+  const pageVisible = usePageVisible();
+  const tileInView = useInViewport(tileRef);
+  const active = pageVisible && tileInView;
 
   useEffect(() => {
     let cancelled = false;
@@ -288,14 +342,24 @@ function CameraTile({ camera, health }: { camera: Camera; health: CameraHealth |
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
 
+  // When the tile re-activates (scrolled back into view, or tab
+  // re-foregrounded), clear any sticky <img> error so the remount has
+  // a clean shot at the stream. Without this, an earlier transient
+  // network blip would keep the "Stream unavailable" placeholder up
+  // even after the conditions that caused it have cleared.
   useEffect(() => {
+    if (active) setImgFailed(false);
+  }, [active]);
+
+  useEffect(() => {
+    // Skip the entire interval setup when the tile is not active —
+    // off-screen tiles + hidden tabs don't need to ping /detections at
+    // all. The effect re-runs on activation change so polling resumes
+    // immediately when the tile scrolls back into view (or the tab is
+    // re-foregrounded).
+    if (!active) return;
     let cancelled = false;
     const tick = async () => {
-      // Skip the network round-trip when the tab is hidden — detection
-      // chips aren't visible anyway, and dropping the fire-rate to zero
-      // saves backend inference cycles and a connection slot the user's
-      // next navigation can grab.
-      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const out = await getCameraDetections(camera.id);
         if (cancelled) return;
@@ -337,7 +401,7 @@ function CameraTile({ camera, health }: { camera: Camera; health: CameraHealth |
         pulseTimerRef.current = null;
       }
     };
-  }, [camera.id]);
+  }, [camera.id, active]);
 
   const toggleFullscreen = async () => {
     const tile = tileRef.current;
@@ -363,6 +427,14 @@ function CameraTile({ camera, health }: { camera: Camera; health: CameraHealth |
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-xs text-rose-200">
             <VideoOff className="h-8 w-8" />
             {streamError}
+          </div>
+        ) : !active ? (
+          // Tile is off-screen or the tab is hidden — unmount the <img>
+          // so the browser tears down the MJPEG socket. The placeholder
+          // keeps the layout stable; the stream resumes on activation.
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-[11px] text-slate-400">
+            <PauseCircle className="h-7 w-7" />
+            <span>{pageVisible ? "Paused — off-screen" : "Paused — tab hidden"}</span>
           </div>
         ) : streamUrl && !imgFailed ? (
           <img

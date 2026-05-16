@@ -1,22 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Cropper, { type Area } from "react-easy-crop";
 import {
+  AlertTriangle,
+  BadgeCheck,
   CheckCircle2,
+  Copy,
   Cpu,
+  Crop as CropIcon,
   ImagePlus,
+  Info,
   Layers,
+  RefreshCcw,
   ScanFace,
   ScanLine,
   Sparkles,
   Trash2,
+  XCircle,
 } from "lucide-react";
 
 import {
+  AtCapacityError,
+  BadImageError,
+  type DuplicateFaceDetail,
+  DuplicateFaceError,
   type Employee,
   type FaceImage,
+  type FaceTrainingStatus,
+  QualityLowerError,
   addFaceImage,
   captureFaceFromCamera,
   deleteFaceImage,
   enrollFaceImages,
+  fullRetrainFaceImages,
   getFaceImages,
   getRecognitionWorkersHealth,
   type RecognitionWorkersHealthResponse,
@@ -36,14 +51,23 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
-// Image-count rules per the face-training spec: at least 3 distinct angles
-// for usable embedding diversity, capped at 5 so a single employee's
-// reference set doesn't bloat the cache or slow recognition.
-const MIN_IMAGES_FOR_TRAINING = 3;
-const MAX_IMAGES_PER_EMPLOYEE = 6;
+// Fallback caps used only for the brief moment between selecting an
+// employee and the first /face-images response landing. The backend
+// returns the authoritative numbers in the ``training`` block of the
+// list response — once that arrives, every UI gate switches over to
+// ``trainingStatus.minRequired`` / ``maxRecommended``.
+const FALLBACK_MIN = 3;
+const FALLBACK_MAX = 6;
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -59,6 +83,37 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(new Error("Failed to read the selected image"));
     reader.readAsDataURL(file);
   });
+}
+
+// Render the chosen crop region to a JPEG data URL. Mirrors the helper
+// in EmployeeForm.tsx so the two cropping flows produce identical
+// output (same quality, same format). 0.92 is a good face-training
+// balance: visually lossless for the eye but ~30% smaller than 1.0.
+async function getCroppedDataUrl(src: string, crop: Area): Promise<string> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Failed to load image for cropping"));
+    img.src = src;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(crop.width));
+  canvas.height = Math.max(1, Math.round(crop.height));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  ctx.drawImage(
+    image,
+    crop.x,
+    crop.y,
+    crop.width,
+    crop.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  return canvas.toDataURL("image/jpeg", 0.92);
 }
 
 // Animation phases for the training overlay. Each one renders a different
@@ -101,18 +156,40 @@ export function FaceTrainingPanel() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [label, setLabel] = useState<string>("");
   const [images, setImages] = useState<FaceImage[]>([]);
+  // Backend-supplied training status — drives the inline status block
+  // ("Already Trained" / "Partially Trained" / "Not Trained") and the
+  // capacity gate. Always reflects ACTUAL embeddings count, not visible
+  // image rows (which can be stale after the post-train cleanup).
+  const [trainingStatus, setTrainingStatus] = useState<FaceTrainingStatus | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [uploading, setUploading] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Inline notice — surfaced at the top of the panel (not a popup) for
+  // bad-image rejections, "image quality lower than existing", and
+  // similar non-blocking feedback. Auto-clears after ~5 s.
+  const [notice, setNotice] = useState<{ kind: "info" | "warn" | "error"; text: string } | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNotice = useCallback((kind: "info" | "warn" | "error", text: string) => {
+    setNotice({ kind, text });
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 5000);
+  }, []);
+  useEffect(() => () => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+  }, []);
   const [deleting, setDeleting] = useState<FaceImage | null>(null);
   const [deletingBusy, setDeletingBusy] = useState<boolean>(false);
   const [trainingPhase, setTrainingPhase] = useState<TrainingPhase | null>(null);
   const [trainingResult, setTrainingResult] = useState<TrainingResult | null>(null);
+  const [retrainBusy, setRetrainBusy] = useState<boolean>(false);
   const [capturingBusy, setCapturingBusy] = useState<boolean>(false);
   const [workerStatus, setWorkerStatus] = useState<RecognitionWorkersHealthResponse | null>(null);
   const [workerError, setWorkerError] = useState<string | null>(null);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Separate file input for the Full Retrain CTA so the same file
+  // picker can route to the dedicated retrain endpoint.
+  const retrainInputRef = useRef<HTMLInputElement | null>(null);
 
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -127,6 +204,114 @@ export function FaceTrainingPanel() {
     },
     [],
   );
+
+  // Duplicate-face prompt — opened by handleFiles when the backend
+  // rejects an upload with 409. The dialog is async-Promise-driven: the
+  // upload loop awaits ``askDuplicateConfirm`` and only resumes when the
+  // admin clicks Cancel (false) or Continue/Retrain (true). Holding the
+  // resolver in state lets us drive the dialog with the existing
+  // AlertDialog component instead of a blocking window.confirm.
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{
+    detail: DuplicateFaceDetail;
+    selectedEmployeeName: string;
+    resolve: (force: boolean) => void;
+  } | null>(null);
+  const askDuplicateConfirm = useCallback(
+    (detail: DuplicateFaceDetail, selectedEmployeeName: string) =>
+      new Promise<boolean>((resolve) => {
+        setDuplicatePrompt({ detail, selectedEmployeeName, resolve });
+      }),
+    [],
+  );
+  const handleDuplicateChoice = (force: boolean) => {
+    duplicatePrompt?.resolve(force);
+    setDuplicatePrompt(null);
+  };
+
+  // (Replace-Weakest capacity prompt removed.) Per the latest spec,
+  // when an employee is at the embedding cap the only allowed action
+  // is Retrain — Add Face is hidden, the upload button is disabled,
+  // and the inline status block tells the admin to use Retrain. If a
+  // backend 409 at_capacity still leaks through (e.g. camera-capture
+  // path), we surface it as an inline notice routing the admin to
+  // Retrain rather than prompting for a partial-replace mid-batch.
+
+  // Full-Retrain confirm — same Promise-driven AlertDialog pattern as
+  // the duplicate / capacity prompts. Replaces the previous
+  // ``window.confirm`` (the native dialog clashed visually with the
+  // dark site chrome and looked unbranded).
+  const [retrainConfirm, setRetrainConfirm] = useState<{
+    employeeName: string;
+    photoCount: number;
+    resolve: (proceed: boolean) => void;
+  } | null>(null);
+  const askRetrainConfirm = useCallback(
+    (employeeName: string, photoCount: number) =>
+      new Promise<boolean>((resolve) => {
+        setRetrainConfirm({ employeeName, photoCount, resolve });
+      }),
+    [],
+  );
+  const handleRetrainConfirm = (proceed: boolean) => {
+    retrainConfirm?.resolve(proceed);
+    setRetrainConfirm(null);
+  };
+
+  // Per-image crop step — opens AFTER the file is read into a data URL
+  // but BEFORE it gets sent to the backend. Promise-driven so a batch
+  // upload steps through one file at a time: each file awaits the
+  // admin's crop / skip / cancel choice, then the loop continues with
+  // the chosen bytes.
+  //
+  // Resolutions:
+  //   string                — the cropped JPEG data URL, send this
+  //   ``original``          — send the file unchanged (skip cropping)
+  //   ``cancel``            — drop this file from the batch entirely
+  const [cropPrompt, setCropPrompt] = useState<{
+    source: string;
+    fileName: string;
+    index: number;
+    total: number;
+    resolve: (result: string | "original" | "cancel") => void;
+  } | null>(null);
+  const [cropPosition, setCropPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [cropZoom, setCropZoom] = useState<number>(1);
+  const [cropArea, setCropArea] = useState<Area | null>(null);
+  const [cropSaving, setCropSaving] = useState<boolean>(false);
+
+  const askForCrop = useCallback(
+    (source: string, fileName: string, index: number, total: number) =>
+      new Promise<string | "original" | "cancel">((resolve) => {
+        // Reset transform state per file so each new image starts
+        // centered + at 1× zoom, not where the previous one left off.
+        setCropPosition({ x: 0, y: 0 });
+        setCropZoom(1);
+        setCropArea(null);
+        setCropSaving(false);
+        setCropPrompt({ source, fileName, index, total, resolve });
+      }),
+    [],
+  );
+  const onCropComplete = useCallback((_: Area, pixels: Area) => {
+    setCropArea(pixels);
+  }, []);
+  const finishCrop = (result: string | "original" | "cancel") => {
+    cropPrompt?.resolve(result);
+    setCropPrompt(null);
+    setCropArea(null);
+    setCropSaving(false);
+  };
+  const handleCropSave = async () => {
+    if (!cropPrompt || !cropArea) return;
+    try {
+      setCropSaving(true);
+      const cropped = await getCroppedDataUrl(cropPrompt.source, cropArea);
+      finishCrop(cropped);
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "Failed to crop image");
+      setCropSaving(false);
+    }
+  };
 
   // "Akash - Hype Technologies" — combined employee + company in a single
   // searchable label so the operator can find a face by either side of the
@@ -163,11 +348,13 @@ export function FaceTrainingPanel() {
     setLoading(true);
     setLoadError(null);
     try {
-      const list = await getFaceImages(employeeId);
-      setImages(list);
+      const result = await getFaceImages(employeeId);
+      setImages(result.items);
+      setTrainingStatus(result.training);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to load face images");
       setImages([]);
+      setTrainingStatus(null);
     } finally {
       setLoading(false);
     }
@@ -189,6 +376,7 @@ export function FaceTrainingPanel() {
       void loadImages(selectedId);
     } else {
       setImages([]);
+      setTrainingStatus(null);
     }
   }, [selectedId, loadImages]);
 
@@ -206,52 +394,140 @@ export function FaceTrainingPanel() {
     }
   }, [cameraOptions, selectedCameraId]);
 
-  const remainingSlots = Math.max(0, MAX_IMAGES_PER_EMPLOYEE - images.length);
+  // Slot accounting is driven by the BACKEND's embeddings count
+  // (trainingStatus.embeddingsCount) rather than the count of visible
+  // image rows. After Train, image_data on every row is cleared and
+  // list_for_employee filters those out — so visible image count
+  // would briefly show 0 even though the embeddings (and the cap)
+  // still apply. Falls back to image count for the brief moment
+  // before the first /face-images response lands.
+  const minRequired = trainingStatus?.minRequired ?? FALLBACK_MIN;
+  const maxRecommended = trainingStatus?.maxRecommended ?? FALLBACK_MAX;
+  const trainedCount = trainingStatus?.embeddingsCount ?? images.length;
+  const remainingSlots = Math.max(0, maxRecommended - trainedCount);
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     if (!selectedId) {
-      window.alert("Pick an employee first.");
+      showNotice("warn", "Pick an employee first.");
       return;
     }
-    // Enforce the 5-image cap at upload time — the backend would also
-    // reject extras, but failing loudly in the UI is friendlier than
-    // having the upload succeed and the cap silently truncate.
-    if (remainingSlots === 0) {
-      window.alert(
-        `Maximum ${MAX_IMAGES_PER_EMPLOYEE} images per employee. Delete an existing one before adding more.`,
-      );
-      return;
-    }
-    const accepted = Array.from(files).slice(0, remainingSlots);
-    if (accepted.length < files.length) {
-      window.alert(
-        `Only the first ${accepted.length} image(s) will be uploaded — ${MAX_IMAGES_PER_EMPLOYEE}-image cap.`,
+    // Frontend gate is friendly-only — the backend cap is the real
+    // enforcement. We let admins ATTEMPT to upload past the cap so the
+    // capacity prompt (Replace Weakest / Cancel) can fire per file.
+    // For batch uploads we still trim the FIRST attempt list to the
+    // available slots so we don't open a flurry of capacity prompts;
+    // when at cap we accept the full batch and route every file
+    // through the prompt.
+    const allFiles = Array.from(files);
+    const accepted =
+      remainingSlots > 0 ? allFiles.slice(0, remainingSlots) : allFiles;
+    if (remainingSlots > 0 && accepted.length < allFiles.length) {
+      showNotice(
+        "info",
+        `Only the first ${accepted.length} image(s) will fit — recommended max is ${maxRecommended}.`,
       );
     }
     setUploading(true);
     let added = 0;
     let failed = 0;
+    let cancelled = 0;
+    const selectedName = selectedEmployee?.name ?? "this employee";
     try {
-      for (const file of accepted) {
+      for (let i = 0; i < accepted.length; i++) {
+        const file = accepted[i];
         if (!file.type.startsWith("image/")) {
           failed += 1;
           continue;
         }
         try {
-          const dataUrl = await readFileAsDataUrl(file);
-          const created = await addFaceImage(selectedId, dataUrl, label.trim());
-          setImages((prev) => [created, ...prev]);
-          added += 1;
+          const original = await readFileAsDataUrl(file);
+          // Crop step. Admin can crop, use the original, or drop this
+          // file from the batch entirely. We deliberately make this a
+          // required step (not a quiet auto-pass) so admins notice the
+          // option exists — but "Use Original" is one click away.
+          const cropChoice = await askForCrop(original, file.name, i + 1, accepted.length);
+          if (cropChoice === "cancel") {
+            cancelled += 1;
+            continue;
+          }
+          const dataUrl = cropChoice === "original" ? original : cropChoice;
+          // Per-file state machine. Each attempt may resolve to:
+          //   * success (saved=true, added += 1)
+          //   * duplicate-prompt ⇒ retry with force=true (or skip)
+          //   * at-capacity ⇒ retry with mode=replace_weakest (or skip)
+          //   * BadImage / QualityLower ⇒ surface inline notice, skip
+          //   * generic error ⇒ count as failed
+          // Capped at three attempts so a misbehaving backend can't
+          // trap us in a retry loop.
+          let force = false;
+          let mode: "add" | "replace_weakest" = "add";
+          let saved = false;
+          let skipFile = false;
+          for (let attempt = 0; attempt < 3 && !saved && !skipFile; attempt++) {
+            try {
+              const created = await addFaceImage(
+                selectedId,
+                dataUrl,
+                label.trim(),
+                { force, mode },
+              );
+              setImages((prev) => [created, ...prev]);
+              added += 1;
+              saved = true;
+            } catch (e) {
+              if (e instanceof DuplicateFaceError && !force) {
+                const proceed = await askDuplicateConfirm(e.detail, selectedName);
+                if (!proceed) { cancelled += 1; skipFile = true; break; }
+                force = true;
+                continue;
+              }
+              if (e instanceof AtCapacityError) {
+                // Per spec: at cap, Add Face is not allowed. Don't
+                // offer a partial-replace fallback — direct the admin
+                // to Retrain via an inline notice and skip this file.
+                showNotice(
+                  "warn",
+                  `${selectedName} is already fully trained with ${e.detail.embeddingsCount} face embeddings. Use Retrain to replace the existing face data.`,
+                );
+                cancelled += 1;
+                skipFile = true;
+                break;
+              }
+              if (e instanceof BadImageError) {
+                showNotice("error", e.message);
+                failed += 1;
+                skipFile = true;
+                break;
+              }
+              if (e instanceof QualityLowerError) {
+                showNotice("warn", e.message);
+                cancelled += 1;
+                skipFile = true;
+                break;
+              }
+              throw e;
+            }
+          }
         } catch (error) {
           failed += 1;
           console.error("face image upload failed", error);
         }
       }
       if (added > 0) {
+        const trailing = [
+          failed > 0 ? `${failed} failed` : null,
+          cancelled > 0 ? `${cancelled} skipped` : null,
+        ]
+          .filter(Boolean)
+          .join(", ");
         showSuccess(
           `Uploaded ${added} image${added === 1 ? "" : "s"}` +
-            (failed > 0 ? ` (${failed} failed)` : ""),
+            (trailing ? ` (${trailing})` : ""),
+        );
+      } else if (cancelled > 0 && failed === 0) {
+        showSuccess(
+          `${cancelled} upload${cancelled === 1 ? "" : "s"} cancelled.`,
         );
       } else if (failed > 0) {
         window.alert(`All ${failed} upload(s) failed.`);
@@ -259,6 +535,10 @@ export function FaceTrainingPanel() {
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      // Refresh from the server so the status block reflects new
+      // embeddings (especially when replace_weakest evicted a row —
+      // we wouldn't otherwise know the count change).
+      if (selectedId) void loadImages(selectedId);
     }
   };
 
@@ -271,6 +551,9 @@ export function FaceTrainingPanel() {
       setImages((prev) => prev.filter((img) => img.id !== removed.id));
       showSuccess("Image deleted.");
       setDeleting(null);
+      // Re-pull status: deleting an image cascades to its embedding
+      // and shrinks the trained count.
+      if (selectedId) void loadImages(selectedId);
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Delete failed");
     } finally {
@@ -303,9 +586,10 @@ export function FaceTrainingPanel() {
 
   const handleTrain = async () => {
     if (!selectedId) return;
-    if (images.length < MIN_IMAGES_FOR_TRAINING) {
-      window.alert(
-        `Upload at least ${MIN_IMAGES_FOR_TRAINING} images (front / left / right) before training.`,
+    if (images.length < minRequired) {
+      showNotice(
+        "warn",
+        `Upload at least ${minRequired} images (front / left / right) before training.`,
       );
       return;
     }
@@ -313,26 +597,87 @@ export function FaceTrainingPanel() {
     const employeeImage = selectedEmployee?.imageUrl;
     const beforeThumbs = images.slice(0, 6).map((i) => i.imageUrl);
     try {
-      let summary: Awaited<ReturnType<typeof enrollFaceImages>> | null = null;
-      const apiPromise = enrollFaceImages(selectedId).then((res) => {
-        summary = res;
-        return res;
-      });
+      // Race the enroll API and the minimum animation duration; await
+      // the API result directly so TypeScript can narrow the value to
+      // its non-null type after the Promise.all resolves.
+      const apiPromise = enrollFaceImages(selectedId);
       await runTrainingAnimation(apiPromise);
-      if (summary) {
-        setImages(summary.items);
-        setTrainingResult({
-          accepted: summary.accepted,
-          rejected: summary.rejected,
-          employeeName,
-          employeeImage,
-          imageThumbnails: beforeThumbs,
-        });
-      }
+      const summary = await apiPromise;
+      setImages(summary.items);
+      setTrainingStatus(summary.training);
+      setTrainingResult({
+        accepted: summary.accepted,
+        rejected: summary.rejected,
+        employeeName,
+        employeeImage,
+        imageThumbnails: beforeThumbs,
+      });
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Training failed");
     } finally {
       setTrainingPhase(null);
+    }
+  };
+
+  // Full Retrain — destructive: deletes every existing embedding for
+  // the selected employee and replaces them with a fresh batch of
+  // photos. Backend validates the entire batch up front and rejects
+  // 422 if any single photo fails the quality gate, so we never end
+  // up halfway through.
+  const handleFullRetrain = async (files: FileList | null) => {
+    if (!files || !selectedId) return;
+    const list = Array.from(files);
+    if (list.length < minRequired) {
+      showNotice("warn", `Full Retrain needs at least ${minRequired} clear photos.`);
+      return;
+    }
+    if (list.length > maxRecommended) {
+      showNotice("warn", `Full Retrain accepts at most ${maxRecommended} photos.`);
+      return;
+    }
+    const proceed = await askRetrainConfirm(
+      selectedEmployee?.name ?? "this employee",
+      list.length,
+    );
+    if (!proceed) {
+      if (retrainInputRef.current) retrainInputRef.current.value = "";
+      return;
+    }
+    setRetrainBusy(true);
+    try {
+      // Cropper runs sequentially per file so each photo can be framed
+      // individually before the destructive replace fires.
+      const originals = await Promise.all(list.map(readFileAsDataUrl));
+      const cropped: string[] = [];
+      for (let i = 0; i < originals.length; i++) {
+        const choice = await askForCrop(originals[i], list[i].name, i + 1, originals.length);
+        if (choice === "cancel") {
+          showNotice("warn", "Retrain cancelled — at least one photo was dropped.");
+          setRetrainBusy(false);
+          if (retrainInputRef.current) retrainInputRef.current.value = "";
+          return;
+        }
+        cropped.push(choice === "original" ? originals[i] : choice);
+      }
+      const summary = await fullRetrainFaceImages(
+        selectedId,
+        cropped.map((dataUrl) => ({ image: dataUrl, label: label.trim() })),
+      );
+      setImages(summary.items);
+      setTrainingStatus(summary.training);
+      showSuccess(
+        `Full retrain complete — ${summary.deletedEmbeddings} old embedding(s) removed, ` +
+        `${summary.accepted} new embedding(s) stored.`,
+      );
+    } catch (error) {
+      if (error instanceof BadImageError) {
+        showNotice("error", error.message);
+      } else {
+        showNotice("error", error instanceof Error ? error.message : "Full retrain failed");
+      }
+    } finally {
+      setRetrainBusy(false);
+      if (retrainInputRef.current) retrainInputRef.current.value = "";
     }
   };
 
@@ -346,26 +691,63 @@ export function FaceTrainingPanel() {
       });
       setImages((prev) => [created, ...prev]);
       showSuccess("Captured from live camera and enrolled.");
+      // Refresh status — capture goes through the same enrollment
+      // path, so trainedCount changed.
+      void loadImages(selectedId);
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Camera capture failed");
+      // Camera capture honors the same per-employee cap. Surface a
+      // useful inline notice instead of a blank alert when we hit it.
+      const msg = error instanceof Error ? error.message : "Camera capture failed";
+      showNotice("error", msg);
     } finally {
       setCapturingBusy(false);
     }
   };
 
   const trainDisabled =
-    !selectedId || trainingPhase !== null || images.length < MIN_IMAGES_FOR_TRAINING;
+    !selectedId || trainingPhase !== null || images.length < minRequired;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="relative flex min-h-0 flex-1 flex-col gap-4">
+      {/* Floated success overlay — pinned to the top of the panel,
+          outside the flex flow, so showing it doesn't shrink the body
+          below. */}
       {successMessage ? (
+        <div className="pointer-events-none absolute inset-x-0 -top-10 z-30 flex justify-center px-2">
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-auto flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-sm font-medium text-emerald-700 shadow-md"
+          >
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <span>{successMessage}</span>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Inline notice (info / warn / error) — bad-image rejections,
+          quality-lower retrain refusals, generic capacity messages.
+          Rendered ABOVE the controls (in-flow, not absolute) so the
+          admin sees it on the natural reading path. */}
+      {notice ? (
         <div
           role="status"
           aria-live="polite"
-          className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-sm font-medium text-emerald-700"
+          className={cn(
+            "flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-sm",
+            notice.kind === "error" && "border-rose-200 bg-rose-50 text-rose-700",
+            notice.kind === "warn" && "border-amber-200 bg-amber-50 text-amber-800",
+            notice.kind === "info" && "border-sky-200 bg-sky-50 text-sky-800",
+          )}
         >
-          <CheckCircle2 className="h-4 w-4 shrink-0" />
-          <span>{successMessage}</span>
+          {notice.kind === "error" ? (
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : notice.kind === "warn" ? (
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          )}
+          <span>{notice.text}</span>
         </div>
       ) : null}
 
@@ -393,7 +775,12 @@ export function FaceTrainingPanel() {
             disabled={!selectedId}
           />
         </div>
-        <div className="flex items-end">
+        {/* Single upload action — Upload images is the only entry
+            point for adding photos. The Retrain primary CTA (right
+            sidebar) is the destructive replace-all path; the old
+            separate "Full Retrain" button was confusing alongside it
+            and has been folded into the single Retrain action. */}
+        <div className="flex items-end gap-2">
           <Button
             type="button"
             disabled={!selectedId || uploading || remainingSlots === 0}
@@ -414,6 +801,17 @@ export function FaceTrainingPanel() {
             multiple
             className="hidden"
             onChange={(e) => void handleFiles(e.target.files)}
+          />
+          {/* Retrain file picker is hidden; the primary CTA in the
+              right sidebar opens it when the employee is already
+              trained. */}
+          <input
+            ref={retrainInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => void handleFullRetrain(e.target.files)}
           />
         </div>
       </div>
@@ -464,11 +862,34 @@ export function FaceTrainingPanel() {
               Pick an employee above to view or add their face training images.
             </div>
           ) : (
-            <div className="grid h-full min-h-0 grid-cols-3 grid-rows-2 gap-3">
+            // Layout adapts to image count so a sparse set doesn't
+            // leave a big empty bottom row:
+            //   • ≤ 3 photos → single auto-sized row, place-content-
+            //     center vertically. Cards take their natural aspect
+            //     and the group sits centered in the panel.
+            //   • 4-6 photos → original 3-col × 2-row grid with
+            //     ``grid-rows-2`` fills the height (each card flex-1
+            //     fills its row).
+            <div
+              className={cn(
+                "grid h-full min-h-0 grid-cols-3 gap-3",
+                images.length <= 3
+                  ? "place-content-center"
+                  : "grid-rows-2",
+              )}
+            >
               {images.map((img) => (
                 <div
                   key={img.id}
-                  className="group relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white"
+                  className={cn(
+                    "group relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white",
+                    // Lock card to a square when we're centering a
+                    // small set, so each one stays a sensible size
+                    // (auto-sized rows would otherwise produce ~zero
+                    // height cells since the image is absolutely
+                    // positioned).
+                    images.length <= 3 && "aspect-square",
+                  )}
                 >
                   {/* The image area fills whatever vertical space the
                       grid row gives it (``flex-1`` + ``min-h-0``), so 6
@@ -511,24 +932,13 @@ export function FaceTrainingPanel() {
             and the column visually anchors to the section's lower edge. */}
         <aside className="flex min-h-0 flex-col gap-3">
           {selectedEmployee ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-600">
-              <div className="font-semibold text-slate-900">{selectedEmployee.name}</div>
-              {selectedEmployee.company ? (
-                <div className="text-xs text-slate-500">{selectedEmployee.company}</div>
-              ) : null}
-              <div className="mt-1.5 text-xs">
-                Stored:{" "}
-                <span className="font-semibold">
-                  {images.length} / {MAX_IMAGES_PER_EMPLOYEE}
-                </span>{" "}
-                image{images.length === 1 ? "" : "s"}
-                {images.length < MIN_IMAGES_FOR_TRAINING ? (
-                  <div className="mt-0.5 text-amber-700">
-                    Need {MIN_IMAGES_FOR_TRAINING - images.length} more to train
-                  </div>
-                ) : null}
-              </div>
-            </div>
+            <TrainingStatusCard
+              employeeName={selectedEmployee.name}
+              company={selectedEmployee.company}
+              status={trainingStatus}
+              minRequired={minRequired}
+              maxRecommended={maxRecommended}
+            />
           ) : (
             <div className="rounded-xl border border-dashed border-slate-300 bg-white px-3.5 py-6 text-center text-sm text-muted-foreground">
               Pick an employee above.
@@ -547,10 +957,11 @@ export function FaceTrainingPanel() {
                 <li>Right-side view</li>
               </ul>
               <div className="mt-1.5 text-[11px] text-sky-700/80">
-                Min {MIN_IMAGES_FOR_TRAINING}, max {MAX_IMAGES_PER_EMPLOYEE} per employee.
+                Min {minRequired}, max {maxRecommended} per employee.
               </div>
             </div>
           ) : null}
+
 
           {/* Train CTA — ``flex-1`` so the card itself stretches to fill
               the empty space between the recommendations and the section
@@ -568,16 +979,56 @@ export function FaceTrainingPanel() {
                   on connected cameras.
                 </span>
               </div>
-              <Button
-                type="button"
-                size="lg"
-                onClick={() => void handleTrain()}
-                disabled={trainDisabled}
-                className="mt-auto h-12 w-full gap-2 text-base font-semibold"
-              >
-                <Sparkles className="h-5 w-5" />
-                Train
-              </Button>
+              {/* Primary CTA: three states keyed off what's in the
+                  grid + the backend trained status.
+                    • images present     → Train (commit pending photos,
+                                            then post-train cleanup
+                                            clears image_data so they
+                                            stop showing as pending)
+                    • no images, trained → Retrain (destructive replace)
+                    • no images, not yet → Train Face (disabled until min)
+
+                  Rationale: after upload, the admin sees their photos
+                  in the grid and expects a Train button to finalize.
+                  Routing them to Retrain in that moment would be both
+                  destructive AND counter-intuitive — embeddings were
+                  already created inline; "Retrain" should only mean
+                  the explicit start-over flow. */}
+              {images.length > 0 ? (
+                <Button
+                  type="button"
+                  size="lg"
+                  onClick={() => void handleTrain()}
+                  disabled={!selectedId || trainingPhase !== null}
+                  className="mt-auto h-12 w-full gap-2 text-base font-semibold"
+                >
+                  <Sparkles className="h-5 w-5" />
+                  Train
+                </Button>
+              ) : trainingStatus?.status === "trained" ||
+                trainingStatus?.status === "over_cap" ? (
+                <Button
+                  type="button"
+                  size="lg"
+                  onClick={() => retrainInputRef.current?.click()}
+                  disabled={!selectedId || retrainBusy}
+                  className="mt-auto h-12 w-full gap-2 bg-amber-600 text-base font-semibold text-white hover:bg-amber-700"
+                >
+                  <RefreshCcw className={cn("h-5 w-5", retrainBusy && "animate-spin")} />
+                  {retrainBusy ? "Retraining…" : "Retrain"}
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="lg"
+                  onClick={() => void handleTrain()}
+                  disabled={trainDisabled}
+                  className="mt-auto h-12 w-full gap-2 text-base font-semibold"
+                >
+                  <Sparkles className="h-5 w-5" />
+                  Train Face
+                </Button>
+              )}
             </div>
           ) : null}
         </aside>
@@ -608,15 +1059,324 @@ export function FaceTrainingPanel() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Duplicate-face prompt — opened by handleFiles when the
+          backend rejects an upload with 409. Two visual variants:
+          - Same employee:   info-style, "add another angle?"
+          - Different person: warning-style, catches wrong-employee selection.
+          Closing the dialog without picking either button is treated
+          as Cancel (keeps the upload loop honest). */}
+      <AlertDialog
+        open={duplicatePrompt !== null}
+        onOpenChange={(open) => {
+          if (!open && duplicatePrompt) handleDuplicateChoice(false);
+        }}
+      >
+        <AlertDialogContent>
+          {duplicatePrompt ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="flex items-center gap-2">
+                  {duplicatePrompt.detail.sameEmployee ? (
+                    <Copy className="h-5 w-5 text-sky-600" />
+                  ) : (
+                    <AlertTriangle className="h-5 w-5 text-amber-600" />
+                  )}
+                  {duplicatePrompt.detail.sameEmployee
+                    ? "Face already trained for this employee"
+                    : "This face matches a different employee"}
+                </AlertDialogTitle>
+                <AlertDialogDescription asChild>
+                  <div className="space-y-2 text-sm text-slate-600">
+                    {duplicatePrompt.detail.sameEmployee ? (
+                      <>
+                        <p>
+                          This face already appears to be trained for{" "}
+                          <span className="font-semibold text-slate-900">
+                            {duplicatePrompt.detail.matchedName}
+                          </span>
+                          .
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Use <strong>Retrain</strong> on the right panel if you want
+                          to replace the old face data. Adding another copy is
+                          rarely needed.
+                        </p>
+                      </>
+                    ) : (
+                      <p>
+                        This face already matches{" "}
+                        <span className="font-semibold text-slate-900">
+                          {duplicatePrompt.detail.matchedName}
+                        </span>
+                        . You are about to train it for{" "}
+                        <span className="font-semibold text-slate-900">
+                          {duplicatePrompt.selectedEmployeeName}
+                        </span>
+                        . Please check the selected employee — continue only if this is intentional.
+                      </p>
+                    )}
+                    <p className="text-xs text-slate-500">
+                      Match confidence:{" "}
+                      <span className="font-medium tabular-nums text-slate-700">
+                        {Math.round(duplicatePrompt.detail.score * 100)}%
+                      </span>
+                    </p>
+                  </div>
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                {/* Same-employee: default is Skip (safe). Cross-
+                    employee: default is Cancel (safer). Both surface
+                    the same destructive verb on the confirm button. */}
+                <AlertDialogCancel onClick={() => handleDuplicateChoice(false)}>
+                  {duplicatePrompt.detail.sameEmployee ? "Skip" : "Cancel"}
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => handleDuplicateChoice(true)}
+                  className={cn(
+                    duplicatePrompt.detail.sameEmployee
+                      ? "bg-sky-600 text-white hover:bg-sky-700"
+                      : "bg-amber-600 text-white hover:bg-amber-700",
+                  )}
+                >
+                  {duplicatePrompt.detail.sameEmployee
+                    ? "Add Anyway"
+                    : "Continue Anyway"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : null}
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Retrain confirm — destructive, so styled like the delete
+          dialog with the same rose action color. Native browser
+          confirm() looked unbranded against the dashboard chrome.
+          Copy matches the product spec's "replace existing face
+          embeddings with the new selected images" wording. */}
+      <AlertDialog
+        open={retrainConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open && retrainConfirm) handleRetrainConfirm(false);
+        }}
+      >
+        <AlertDialogContent>
+          {retrainConfirm ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="flex items-center gap-2">
+                  <RefreshCcw className="h-5 w-5 text-rose-600" />
+                  Retrain this employee?
+                </AlertDialogTitle>
+                <AlertDialogDescription asChild>
+                  <div className="space-y-2 text-sm text-slate-600">
+                    <p>
+                      Retraining will <strong className="text-rose-600">remove</strong>{" "}
+                      the old face embeddings for{" "}
+                      <span className="font-semibold text-slate-900">
+                        {retrainConfirm.employeeName}
+                      </span>{" "}
+                      and train them with the{" "}
+                      <span className="font-semibold text-slate-900 tabular-nums">
+                        {retrainConfirm.photoCount}
+                      </span>{" "}
+                      new image{retrainConfirm.photoCount === 1 ? "" : "s"} you selected. Continue?
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Safe replace: the new images are validated and
+                      embeddings are staged <em>before</em> the old set is
+                      removed. If validation fails, the existing trained
+                      faces stay exactly as they were.
+                    </p>
+                  </div>
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel onClick={() => handleRetrainConfirm(false)}>
+                  Cancel
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => handleRetrainConfirm(true)}
+                  className="bg-rose-600 text-white hover:bg-rose-700"
+                >
+                  Retrain
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : null}
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Per-file crop step. Closing via X / Esc / outside-click is
+          treated as Cancel (drop this file from the batch) — same
+          convention as the other prompts. */}
+      <Dialog
+        open={cropPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open && cropPrompt) finishCrop("cancel");
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CropIcon className="h-5 w-5 text-primary" />
+              Crop image
+              {cropPrompt && cropPrompt.total > 1 ? (
+                <span className="ml-1 text-xs font-normal text-slate-500">
+                  ({cropPrompt.index} of {cropPrompt.total})
+                </span>
+              ) : null}
+            </DialogTitle>
+          </DialogHeader>
+          {cropPrompt ? (
+            <div className="space-y-3">
+              <div className="truncate text-xs text-slate-500" title={cropPrompt.fileName}>
+                {cropPrompt.fileName}
+              </div>
+              {/* Square aspect — InsightFace's input pipeline resizes
+                  to a square anyway, and the head-shot framing reads
+                  cleanly. ``showGrid`` helps the admin center on the
+                  face. */}
+              <div className="relative h-72 w-full overflow-hidden rounded-lg bg-slate-900">
+                <Cropper
+                  image={cropPrompt.source}
+                  crop={cropPosition}
+                  zoom={cropZoom}
+                  aspect={1}
+                  showGrid
+                  onCropChange={setCropPosition}
+                  onZoomChange={setCropZoom}
+                  onCropComplete={onCropComplete}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Label className="text-xs font-medium text-slate-600">Zoom</Label>
+                <input
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={0.01}
+                  value={cropZoom}
+                  onChange={(e) => setCropZoom(Number(e.target.value))}
+                  className="flex-1 accent-primary"
+                />
+                <span className="w-10 text-right text-xs tabular-nums text-slate-500">
+                  {cropZoom.toFixed(2)}×
+                </span>
+              </div>
+              <p className="text-[11px] leading-snug text-slate-500">
+                Center the face in the square — leave a small margin around the
+                head. Click <strong>Use Original</strong> to skip cropping for
+                this file.
+              </p>
+            </div>
+          ) : null}
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              variant="outline"
+              onClick={() => finishCrop("cancel")}
+              disabled={cropSaving}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => finishCrop("original")}
+              disabled={cropSaving}
+            >
+              Use Original
+            </Button>
+            <Button
+              onClick={() => void handleCropSave()}
+              disabled={!cropArea || cropSaving}
+            >
+              {cropSaving ? "Cropping…" : "Save Crop"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 // -----------------------------------------------------------------------------
-// Inline training panels — render INSIDE the Face Training section, no modal
-// overlay. The parent component swaps between the idle Train button, this
-// progress view, and the success view based on training state.
+// Inline status / training panels — render INSIDE the Face Training section.
+// The parent component swaps between the idle Train button, the progress
+// view, and the success view based on training state.
 // -----------------------------------------------------------------------------
+
+function TrainingStatusCard({
+  employeeName,
+  company,
+  status,
+  minRequired,
+  maxRecommended,
+}: {
+  employeeName: string;
+  company?: string;
+  status: FaceTrainingStatus | null;
+  minRequired: number;
+  maxRecommended: number;
+}) {
+  // Visual variant per status. Drives the badge color, the body
+  // copy, and (for the over_cap legacy state) a clarifying line so
+  // ops know the cap is now backend-enforced.
+  const count = status?.embeddingsCount ?? 0;
+  const variant: { label: string; tone: string; iconCls: string; Icon: typeof BadgeCheck } =
+    status?.status === "trained"
+      ? { label: "Already Trained", tone: "border-emerald-200 bg-emerald-50 text-emerald-800", iconCls: "text-emerald-600", Icon: BadgeCheck }
+      : status?.status === "partial"
+      ? { label: "Partially Trained", tone: "border-amber-200 bg-amber-50 text-amber-900", iconCls: "text-amber-600", Icon: AlertTriangle }
+      : status?.status === "over_cap"
+      ? { label: "Over Cap", tone: "border-rose-200 bg-rose-50 text-rose-800", iconCls: "text-rose-600", Icon: AlertTriangle }
+      : { label: "Not Trained", tone: "border-slate-200 bg-slate-50 text-slate-700", iconCls: "text-slate-500", Icon: Info };
+  const { Icon } = variant;
+  return (
+    <div className={cn("rounded-xl border px-3.5 py-2.5 text-sm", variant.tone)}>
+      <div className="font-semibold text-slate-900">{employeeName}</div>
+      {company ? <div className="text-xs text-slate-500">{company}</div> : null}
+      <div className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide">
+        <Icon className={cn("h-3.5 w-3.5", variant.iconCls)} />
+        {variant.label}
+      </div>
+      <div className="mt-1 text-xs">
+        Embeddings:{" "}
+        <span className="font-semibold tabular-nums">
+          {count} / {maxRecommended}
+        </span>
+        {" · min "}
+        <span className="tabular-nums">{minRequired}</span>
+      </div>
+      {status?.status === "trained" && count >= maxRecommended ? (
+        // At-capacity (fully trained) wording — distinct from the
+        // generic "trained" copy. Tells the admin Add Face is gated
+        // and Retrain is the only path to change the face set.
+        <div className="mt-1 text-[11px] leading-snug text-emerald-700/80">
+          This employee is already fully trained with {count} face embedding
+          {count === 1 ? "" : "s"}. Use <strong>Retrain</strong> to replace the
+          existing face data with new images.
+        </div>
+      ) : status?.status === "trained" ? (
+        <div className="mt-1 text-[11px] leading-snug text-emerald-700/80">
+          This employee is already trained with {count} face embedding
+          {count === 1 ? "" : "s"}. Add more angles up to {maxRecommended}, or
+          Retrain to replace the existing set.
+        </div>
+      ) : status?.status === "partial" ? (
+        <div className="mt-1 text-[11px] leading-snug">
+          Need {minRequired - count} more clear photo
+          {minRequired - count === 1 ? "" : "s"} to train.
+        </div>
+      ) : status?.status === "over_cap" ? (
+        <div className="mt-1 text-[11px] leading-snug">
+          Cap is now {maxRecommended}. New uploads will be rejected — use
+          Retrain to start fresh.
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function TrainingInlinePanel({
   phase,
@@ -644,11 +1404,15 @@ function TrainingInlinePanel({
       {/* Thumbnail strip with a sweeping scan-line — visualises the
           "images are being scanned" beat of the animation. */}
       {imageThumbnails.length > 0 ? (
-        <div className="mb-3 grid grid-cols-6 gap-2">
+        // Centered flex strip instead of a fixed 6-col grid — fewer
+        // than 6 thumbnails used to be left-stacked with a large
+        // empty right half. justify-center + width-capped children
+        // keeps the strip looking intentional at any count.
+        <div className="mb-3 flex flex-wrap justify-center gap-2">
           {imageThumbnails.slice(0, 6).map((src, i) => (
             <div
               key={`${src}-${i}`}
-              className="relative aspect-square overflow-hidden rounded-md border border-slate-200 bg-slate-100"
+              className="relative aspect-square w-[14%] min-w-[64px] max-w-[110px] overflow-hidden rounded-md border border-slate-200 bg-slate-100"
             >
               <img
                 src={src}

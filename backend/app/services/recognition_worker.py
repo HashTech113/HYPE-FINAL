@@ -45,13 +45,19 @@ os.environ.setdefault(
     "rtsp_transport;tcp|stimeout;5000000",
 )
 
-from ..config import CAPTURE_INTERVAL_SECONDS
+from datetime import datetime, timezone
+
+from ..config import CAPTURE_INTERVAL_SECONDS, LOCAL_TZ_OFFSET_MIN
 from ..db import session_scope
 from ..models import Camera as CameraModel
 from . import live_frames
 from . import logs as logs_service
+from .attendance_state import AttendanceStateMachine
+from .embedding_cache import get_embedding_cache
 from .face_service import FaceRecognitionError, get_face_service
 from .recognition import get_cooldown, get_recognition_service
+from .recognition_config import get_recognition_settings
+from .unknown_capture import UnknownCaptureService
 
 log = logging.getLogger(__name__)
 
@@ -376,7 +382,6 @@ class RecognitionWorker:
                 # `camera_fps` controls detection cadence; `recognize_min_
                 # face_size_px` filters out distant faces too small for a
                 # reliable embedding match.
-                from .recognition_config import get_recognition_settings
                 rcfg = get_recognition_settings()
                 detect_interval = 1.0 / float(max(1, rcfg.camera_fps))
                 min_size_px = int(rcfg.recognize_min_face_size_px)
@@ -404,7 +409,6 @@ class RecognitionWorker:
                 # snapshot_logs, not whether we draw an overlay box. The
                 # operator needs to see "Unknown" boxes for un-enrolled
                 # people too.
-                from .embedding_cache import get_embedding_cache
                 id_to_name = get_embedding_cache().id_to_name_map()
                 new_faces_with_match: list[tuple] = []
                 unmatched_faces: list = []
@@ -445,8 +449,6 @@ class RecognitionWorker:
                 # recognition loop alive even if the DB or disk hiccups.
                 if unmatched_faces:
                     try:
-                        from .unknown_capture import UnknownCaptureService
-                        from ..db import session_scope
                         with session_scope() as unk_session:
                             svc = UnknownCaptureService(unk_session)
                             for f in unmatched_faces:
@@ -468,11 +470,6 @@ class RecognitionWorker:
                 # current state for the local day. The state machine
                 # writes the row + recomputes the daily rollup; failures
                 # are logged but never break the recognition loop.
-                from datetime import datetime, timezone
-                from ..config import LOCAL_TZ_OFFSET_MIN
-                from ..db import session_scope
-                from .attendance_state import AttendanceStateMachine
-
                 for bbox, name, score, employee_id in new_faces_with_match:
                     if employee_id is None:
                         continue
@@ -517,27 +514,47 @@ class RecognitionWorker:
                 next_detect_at = time.monotonic() + detect_interval
 
             # ----- Frame cadence: light work, every loop iteration -----
-            # Draw the most recently known detections on this frame and
-            # push to the live-frame buffer. Drawing happens on a copy
-            # so the original frame stays clean for the snapshot crop.
+            # Push the latest annotated frame to the MJPEG buffer. Two
+            # cost-cutting moves vs. the obvious "copy → draw → resize"
+            # order:
+            #   * Resize FIRST. A 4K BGR frame is ~33 MB; copying and
+            #     drawing on it before the resize burns ~150-200 MB/s of
+            #     memcpy per camera. We resize the raw frame instead and
+            #     only copy/draw on the small (≤1280-px-wide) version,
+            #     rescaling the bboxes by the same ratio.
+            #   * Skip the copy entirely when there are no overlays to
+            #     draw. Between detection passes (most loop iterations,
+            #     given camera_fps ≪ 20 publish-fps) we encode the small
+            #     frame straight from cv2.resize's output buffer — no
+            #     intermediate np.copy at all. Detection still ran on
+            #     the full-res frame, so accuracy is unchanged.
             try:
-                annotated = _draw_overlays(frame, last_faces_with_match)
-                # Downscale before JPEG encode. Full-res frames are kept
-                # in ``self._latest_frame`` (training/capture endpoint
-                # uses those) and detection ran on ``frame`` already —
-                # only the live-stream JPEG gets shrunk, so accuracy is
-                # untouched. cv2.INTER_AREA is the right pick for
-                # downsampling (avoids aliasing on text/edges).
-                fh, fw = annotated.shape[:2]
+                fh, fw = frame.shape[:2]
                 if fw > live_publish_max_width:
                     scale = live_publish_max_width / float(fw)
                     new_w = live_publish_max_width
                     new_h = int(round(fh * scale))
-                    annotated = cv2.resize(
-                        annotated, (new_w, new_h), interpolation=cv2.INTER_AREA,
+                    # cv2.INTER_AREA is the right pick for downsampling
+                    # (avoids aliasing on text/edges in busy scenes).
+                    small = cv2.resize(
+                        frame, (new_w, new_h), interpolation=cv2.INTER_AREA,
                     )
+                else:
+                    scale = 1.0
+                    small = frame  # already small enough — no resize, no copy
+                if last_faces_with_match:
+                    # _draw_overlays does its own .copy(small) internally,
+                    # so the source array is never mutated.
+                    annotated = _draw_overlays(
+                        small, last_faces_with_match, scale=scale,
+                    )
+                else:
+                    # No overlays this frame — encode `small` directly.
+                    # cv2.imencode only reads, so passing the un-copied
+                    # frame is safe.
+                    annotated = small
                 ok_pub, jpg_pub = cv2.imencode(
-                    ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                    ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 65]
                 )
                 if ok_pub:
                     live_frames.publish(self.job.id, jpg_pub.tobytes())
@@ -585,6 +602,8 @@ def _expand_bbox_to_head(
 def _draw_overlays(
     frame: np.ndarray,
     faces_with_match: list[tuple],
+    *,
+    scale: float = 1.0,
 ) -> np.ndarray:
     """Return a COPY of ``frame`` with a bounding box + label drawn for
     each detected face. Matched faces get a green box with
@@ -592,6 +611,13 @@ def _draw_overlays(
     ``"Unknown"``. The box covers the full head (forehead + hair), not
     just the tight face crop the detector returns. Done on a copy so
     the caller's untouched frame is still available for snapshot crops.
+
+    ``scale`` rescales the inference-time bboxes (computed on the
+    full-resolution frame) onto the (typically smaller) ``frame`` we're
+    drawing on. The hot loop resizes BEFORE drawing to avoid copying
+    the full-res frame; this argument lets the bbox math line up with
+    the downscaled canvas. Defaults to 1.0 for callers that draw on
+    the same resolution detection ran at.
     """
     annotated = frame.copy()
     # OpenCV uses BGR, so colors are (B, G, R).
@@ -606,6 +632,8 @@ def _draw_overlays(
             bbox, name, score, _employee_id = entry[0], entry[1], entry[2], entry[3]
         else:
             bbox, name, score = entry[0], entry[1], entry[2]
+        if scale != 1.0:
+            bbox = tuple(int(round(c * scale)) for c in bbox)
         x1, y1, x2, y2 = _expand_bbox_to_head(bbox, annotated.shape)
         matched = name is not None
         color = GREEN if matched else RED

@@ -267,28 +267,153 @@ export type FaceImage = {
   qualityScore?: number | null;
 };
 
-export async function getFaceImages(employeeId: string): Promise<FaceImage[]> {
+/** Per-employee training-set summary returned alongside the image list
+ * (and after enroll / full-retrain). Drives the inline "Already
+ * Trained / Partially Trained / Not Trained" status block at the top
+ * of the Face Training panel — based on actual embeddings, NOT
+ * face_image rows (which can be stale stubs after the post-train
+ * image_data cleanup). */
+export type FaceTrainingStatus = {
+  employeeId: string;
+  embeddingsCount: number;
+  minRequired: number;
+  maxRecommended: number;
+  status: "untrained" | "partial" | "trained" | "over_cap";
+  atCapacity: boolean;
+};
+
+export type FaceImagesResult = {
+  items: FaceImage[];
+  training: FaceTrainingStatus;
+};
+
+export async function getFaceImages(employeeId: string): Promise<FaceImagesResult> {
   const resp = await authFetch(
     buildUrl(`/api/employees/${encodeURIComponent(employeeId)}/face-images`, {}),
   );
   if (!resp.ok) throw new Error(await readErrorDetail(resp, "getFaceImages"));
-  const data = (await resp.json()) as { items: FaceImage[] };
-  return data.items ?? [];
+  const data = (await resp.json()) as { items: FaceImage[]; training: FaceTrainingStatus };
+  return { items: data.items ?? [], training: data.training };
+}
+
+/** Backend 409 response body when an upload's face matches an
+ * already-trained employee. The UI surfaces this to the admin so they
+ * can choose to retrain (sets ``force=true`` on the next attempt) or
+ * skip. ``sameEmployee`` distinguishes "this face is already trained
+ * for this person" from "you've selected the wrong employee". */
+export type DuplicateFaceDetail = {
+  matchedEmployeeId: string;
+  matchedName: string;
+  score: number;
+  sameEmployee: boolean;
+  message: string;
+};
+
+export class DuplicateFaceError extends Error {
+  readonly detail: DuplicateFaceDetail;
+  constructor(detail: DuplicateFaceDetail) {
+    super(detail.message);
+    this.name = "DuplicateFaceError";
+    this.detail = detail;
+  }
+}
+
+/** 409 when the per-employee embedding cap is reached. Frontend offers
+ * "Replace Weakest" or "Full Retrain" instead of silently appending. */
+export type AtCapacityDetail = {
+  embeddingsCount: number;
+  maxRecommended: number;
+  message: string;
+};
+
+export class AtCapacityError extends Error {
+  readonly detail: AtCapacityDetail;
+  constructor(detail: AtCapacityDetail) {
+    super(detail.message);
+    this.name = "AtCapacityError";
+    this.detail = detail;
+  }
+}
+
+/** 409 returned by mode=replace_weakest when the new image's quality
+ * is lower than the worst already-stored embedding — backend refuses
+ * to silently overwrite a better photo with a worse one. */
+export class QualityLowerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QualityLowerError";
+  }
+}
+
+/** 422 when the uploaded image fails the training quality gate (no
+ * face / multiple faces / too small / detector score too low). Has a
+ * uniform user-facing message; the specific reason lives in server
+ * logs. */
+export class BadImageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BadImageError";
+  }
 }
 
 export async function addFaceImage(
   employeeId: string,
   image: string,
   label = "",
+  options: { force?: boolean; mode?: "add" | "replace_weakest" } = {},
 ): Promise<FaceImage> {
+  // ``force=true`` is sent only after the admin confirms a duplicate-
+  // face warning. ``mode=replace_weakest`` is sent only after the admin
+  // confirms a "this employee is already trained — retrain?" prompt.
+  // Both are absent on first attempt so the safe defaults stay in
+  // charge of the happy path.
+  const query: Record<string, string> = {};
+  if (options.force) query.force = "true";
+  if (options.mode && options.mode !== "add") query.mode = options.mode;
   const resp = await authFetch(
-    buildUrl(`/api/employees/${encodeURIComponent(employeeId)}/face-images`, {}),
+    buildUrl(`/api/employees/${encodeURIComponent(employeeId)}/face-images`, query),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image, label }),
     },
   );
+  // Structured error parsing — backend returns one of:
+  //   422 bad_image       → BadImageError
+  //   409 duplicate_face  → DuplicateFaceError
+  //   409 at_capacity     → AtCapacityError
+  //   409 quality_lower   → QualityLowerError
+  if (resp.status === 422 || resp.status === 409) {
+    let body: { detail?: Record<string, unknown> } | null = null;
+    try { body = (await resp.json()) as { detail?: Record<string, unknown> }; } catch { /* not JSON */ }
+    const d = body?.detail as Record<string, unknown> | undefined;
+    const code = typeof d?.code === "string" ? d.code : "";
+    const message = typeof d?.message === "string" ? d.message : "";
+    if (resp.status === 422 && code === "bad_image") {
+      throw new BadImageError(message || "Image not suitable for training.");
+    }
+    if (code === "duplicate_face") {
+      throw new DuplicateFaceError({
+        matchedEmployeeId: String(d?.matched_employee_id ?? ""),
+        matchedName: String(d?.matched_name ?? ""),
+        score: typeof d?.score === "number" ? d.score : 0,
+        sameEmployee: Boolean(d?.same_employee),
+        message: message || "This face is already trained.",
+      });
+    }
+    if (code === "at_capacity") {
+      throw new AtCapacityError({
+        embeddingsCount: typeof d?.embeddings_count === "number" ? d.embeddings_count : 0,
+        maxRecommended: typeof d?.max_recommended === "number" ? d.max_recommended : 6,
+        message: message || "This employee is already trained.",
+      });
+    }
+    if (code === "quality_lower") {
+      throw new QualityLowerError(
+        message || "Image quality is lower than the existing trained faces.",
+      );
+    }
+  }
   if (!resp.ok) throw new Error(await readErrorDetail(resp, "addFaceImage"));
   return (await resp.json()) as FaceImage;
 }
@@ -306,6 +431,7 @@ export type FaceEnrollSummary = {
   rejected: number;
   total: number;
   items: FaceImage[];
+  training: FaceTrainingStatus;
 };
 
 export async function enrollFaceImages(employeeId: string): Promise<FaceEnrollSummary> {
@@ -315,6 +441,50 @@ export async function enrollFaceImages(employeeId: string): Promise<FaceEnrollSu
   );
   if (!resp.ok) throw new Error(await readErrorDetail(resp, "enrollFaceImages"));
   return (await resp.json()) as FaceEnrollSummary;
+}
+
+export type FullRetrainSummary = {
+  employeeId: string;
+  deletedEmbeddings: number;
+  accepted: number;
+  rejected: number;
+  items: FaceImage[];
+  training: FaceTrainingStatus;
+};
+
+/** Replace EVERY embedding for one employee with a fresh batch.
+ * Backend validates the entire batch up front; if any image fails the
+ * quality gate the whole call is rejected (so partial retrains can't
+ * leave the employee in a worse state than before). */
+export async function fullRetrainFaceImages(
+  employeeId: string,
+  images: { image: string; label?: string }[],
+): Promise<FullRetrainSummary> {
+  const resp = await authFetch(
+    buildUrl(`/api/employees/${encodeURIComponent(employeeId)}/face-images/full-retrain`, {}),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        images: images.map((i) => ({ image: i.image, label: i.label ?? "" })),
+      }),
+    },
+  );
+  if (resp.status === 422) {
+    let body: { detail?: Record<string, unknown> } | null = null;
+    try { body = (await resp.json()) as { detail?: Record<string, unknown> }; } catch { /* not JSON */ }
+    const d = body?.detail as Record<string, unknown> | undefined;
+    const code = typeof d?.code === "string" ? d.code : "";
+    const message = typeof d?.message === "string" ? d.message : "";
+    if (code === "bad_image") {
+      throw new BadImageError(message || "Image not suitable for training.");
+    }
+    if (code === "too_few_images" || code === "too_many_images") {
+      throw new Error(message);
+    }
+  }
+  if (!resp.ok) throw new Error(await readErrorDetail(resp, "fullRetrainFaceImages"));
+  return (await resp.json()) as FullRetrainSummary;
 }
 
 export type CaptureFromCameraPayload = {
