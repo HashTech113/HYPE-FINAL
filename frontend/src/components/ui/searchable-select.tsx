@@ -127,8 +127,13 @@ export function SearchableSelect({
     const next = options.find((opt) => opt.value === nextValue) ?? null;
     onValueChange(nextValue);
     setQuery(next?.label ?? "");
-    setOpen(true);
-    setIsEditing(true);
+    // Close the dropdown and exit edit mode after a selection — this
+    // is a single-select control, so keeping the suggestions list
+    // open below the chosen value reads as "haven't actually picked
+    // anything yet" (which was confusing). The input keeps focus
+    // because we don't blur it; re-clicking re-opens the list.
+    setOpen(false);
+    setIsEditing(false);
   };
 
   return (

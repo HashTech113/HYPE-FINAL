@@ -41,12 +41,16 @@ log = logging.getLogger(__name__)
 MIN_EMBEDDINGS_FOR_TRAINING = 3
 MAX_EMBEDDINGS_PER_EMPLOYEE = 6
 
-# Quality gates for upload-time training photos. Stricter than the live
-# camera detector because the operator gets to choose this photo and we
-# don't want one fuzzy enrollment dragging down recognition for an
-# entire employee.
-TRAIN_MIN_FACE_PX = 80          # min(bbox_w, bbox_h) — bigger == more pixels for embedding
-TRAIN_MIN_DET_SCORE = 0.65      # InsightFace detector confidence floor for training
+# Quality gates for upload-time training photos. Looser than the
+# previous (80 px / 0.65) values — those rejected too many legitimate
+# uploads where the admin's photo was cropped tighter than 80 px or
+# the lighting brought the detector confidence to ~0.6. Live
+# recognition uses 0.55 anyway, so demanding higher quality from
+# stored embeddings was inconsistent. The validation still keeps the
+# OBVIOUS junk out: no face, multiple faces, postage-stamp-tiny
+# crops, near-blank frames.
+TRAIN_MIN_FACE_PX = 50          # min(bbox_w, bbox_h)
+TRAIN_MIN_DET_SCORE = 0.55      # InsightFace detector confidence floor
 
 # Same-employee duplicate detection uses a TIGHTER threshold than the
 # live recognition floor. Reason: an admin enrolling multiple angles for
@@ -102,9 +106,10 @@ def detect_face_in_image_data(
     return best.embedding, float(best.det_score), None
 
 
-# Generic message returned to the frontend for any quality failure — the
-# spec calls for one polite copy regardless of the exact reason. Internal
-# logs still record the specific cause.
+# Generic fallback only used by call sites that don't have a more
+# specific reason. ``validate_for_training`` itself now returns the
+# actual cause (no face / too small / etc.) so the admin can tell
+# what to fix instead of guessing.
 TRAINING_BAD_IMAGE_MESSAGE = (
     "Image not suitable for training. Please upload a clear "
     "front/left/right face image."
@@ -114,58 +119,69 @@ TRAINING_BAD_IMAGE_MESSAGE = (
 def validate_for_training(
     raw: str | bytes,
 ) -> tuple[Optional[np.ndarray], Optional[float], Optional[str]]:
-    """Strict pre-flight for training uploads. Returns
+    """Pre-flight for training uploads. Returns
     ``(embedding, det_score, error_message)``.
 
-    Rejects (returns ``error_message``) when:
-      * the file can't be decoded as an image,
-      * no face is detected,
-      * MORE than one face is in the frame (group photos / two people
-        in front of the camera) — admin must crop or retake,
-      * the largest face is smaller than ``TRAIN_MIN_FACE_PX`` on its
-        shortest side (subject too far / framed too loosely),
-      * the InsightFace detector score is below
-        ``TRAIN_MIN_DET_SCORE`` (catches blur, off-angle, occluded
-        faces — the score correlates strongly with all three).
-
-    The user-facing string is uniform on purpose; the specific reason
-    is logged so ops can audit, but the admin only sees one consistent
-    "image not suitable" message per the product spec.
+    On failure, ``error_message`` is the SPECIFIC reason the photo
+    was rejected — surfaced to the admin so they know what to fix
+    (the previous behaviour returned a uniform "Image not suitable"
+    blob, which forced admins to guess between "tighter crop", "more
+    light", "different photo", etc.).
     """
     bgr = _decode_to_bgr(raw)
     if bgr is None:
         log.info("training upload rejected: could not decode image")
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
+        return None, None, "Could not read the image file. Try a different photo."
     face_svc = get_face_service()
     try:
         faces = face_svc.detect(bgr)
     except FaceRecognitionError as exc:
         log.info("training upload rejected: detect failed: %s", exc)
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
+        return None, None, "Could not analyze the image. Try a different photo."
     if not faces:
         log.info("training upload rejected: no face detected")
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
+        return (
+            None,
+            None,
+            "No face detected. Use a clear photo where the face is fully visible.",
+        )
     if len(faces) > 1:
         log.info(
             "training upload rejected: multiple faces detected (n=%d)", len(faces),
         )
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
+        return (
+            None,
+            None,
+            f"{len(faces)} faces detected. Crop the photo so only the employee is in frame.",
+        )
     best = faces[0]
     face_w = int(best.bbox[2] - best.bbox[0])
     face_h = int(best.bbox[3] - best.bbox[1])
-    if min(face_w, face_h) < TRAIN_MIN_FACE_PX:
+    shortest = min(face_w, face_h)
+    if shortest < TRAIN_MIN_FACE_PX:
         log.info(
             "training upload rejected: face too small (%dx%d < %d)",
             face_w, face_h, TRAIN_MIN_FACE_PX,
         )
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
-    if float(best.det_score) < TRAIN_MIN_DET_SCORE:
+        return (
+            None,
+            None,
+            f"Face is too small ({shortest}px). Use a closer or higher-resolution photo "
+            f"(at least {TRAIN_MIN_FACE_PX}px on the shortest side).",
+        )
+    score = float(best.det_score)
+    if score < TRAIN_MIN_DET_SCORE:
         log.info(
             "training upload rejected: low detector score (%.2f < %.2f)",
-            float(best.det_score), TRAIN_MIN_DET_SCORE,
+            score, TRAIN_MIN_DET_SCORE,
         )
-        return None, None, TRAINING_BAD_IMAGE_MESSAGE
-    return best.embedding, float(best.det_score), None
+        return (
+            None,
+            None,
+            f"Image quality is too low (confidence {score:.0%}). Use a sharper, "
+            "well-lit photo facing the camera.",
+        )
+    return best.embedding, score, None
 
 
 @dataclass(frozen=True)
@@ -325,10 +341,28 @@ def retrain_employee_atomic(
     cache = get_embedding_cache()
 
     with session_scope() as session:
-        # 1) Stage new FaceImage rows. We insert these FIRST so their
-        #    auto-generated ids exist for the new FaceEmbedding.face_
-        #    image_id FK below — without this the embedding rows would
-        #    point at nothing.
+        # 0) Clear ``image_data`` on every PRE-EXISTING face_image row
+        #    for this employee. These rows stay in the DB as audit
+        #    history (id, created_at, created_by), but their base64
+        #    payload should not linger in the panel grid after a
+        #    retrain — the new images are the current trained set,
+        #    and showing the old photos alongside them would confuse
+        #    the admin about what's actually trained right now.
+        #    ``list_for_employee`` filters by ``image_data != ""`` so
+        #    clearing here is enough to hide them from the UI.
+        session.execute(
+            update(FaceImage)
+            .where(FaceImage.employee_id == str(employee_id))
+            .where(FaceImage.image_data != "")
+            .values(image_data="")
+        )
+
+        # 1) Stage new FaceImage rows. Inserted AFTER the clear above
+        #    so their image_data is preserved. We insert these FIRST
+        #    (before the embedding deletes) so their auto-generated
+        #    ids exist for the new FaceEmbedding.face_image_id FK
+        #    below — without this the embedding rows would point at
+        #    nothing.
         new_image_rows: list[FaceImage] = []
         for s in staged:
             payload = face_images_service._normalize_image(s.image_data)  # noqa: SLF001
@@ -574,18 +608,17 @@ def enroll_with_known_embedding(
 
 
 def enroll_employee_all(employee_id: str) -> list[EnrollOutcome]:
-    """Re-process every stored face image for an employee, then **discard
-    the inline image_data** for every row that now has an embedding so the
-    DB isn't carrying redundant training photos forever (privacy + storage).
+    """Re-process every stored face image for an employee.
 
-    The recognition hot-path only reads ``face_embeddings.vector`` — once
-    the embedding row exists, the source image is no longer needed for
-    live matching. The ``face_images`` row itself stays as an audit trail
-    (id, employee_id, label, created_at, created_by) so we can answer
-    "how many photos was this person trained on?" later; only the heavy
-    base64 payload is cleared.
-
-    Used by the 'Train' button.
+    Used by the 'Train' button. Previously this also called
+    :func:`purge_trained_image_data` to wipe the base64 payload after
+    enrollment — that was a privacy/storage optimization but it had a
+    bad UX side-effect: the Face Training panel went BLANK after Train,
+    so admins couldn't see what they had trained. The current product
+    spec wants the "Already Trained" panel to show the existing trained
+    images, so we leave ``image_data`` in place. The retroactive purge
+    helper is still callable from one-off maintenance scripts if the
+    storage cost ever becomes a problem.
     """
     with session_scope() as session:
         image_ids = [
@@ -596,13 +629,7 @@ def enroll_employee_all(employee_id: str) -> list[EnrollOutcome]:
                 .order_by(FaceImage.created_at.desc(), FaceImage.id.desc())
             ).all()
         ]
-    outcomes = [enroll_face_image(i) for i in image_ids]
-    # Cleanup pass: clear image_data on every face_image of this employee
-    # that now has at least one embedding. Idempotent and safe to re-run
-    # — already-cleared rows just match nothing.
-    if any(o.accepted for o in outcomes):
-        purge_trained_image_data(employee_id=employee_id)
-    return outcomes
+    return [enroll_face_image(i) for i in image_ids]
 
 
 def purge_trained_image_data(*, employee_id: Optional[str] = None) -> int:

@@ -117,6 +117,22 @@ class PromoteToNewRequest(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=32)
     mobile: Optional[str] = Field(default=None, max_length=32)
     is_active: bool = True
+    # Subset of cluster captures to train on. Omit (or null) to fall
+    # back to the legacy "all KEEP captures" behavior. The admin UI
+    # always sends an explicit selection of 3-6 ids.
+    capture_ids: Optional[list[int]] = Field(default=None, max_length=64)
+
+
+class PromoteToExistingRequest(BaseModel):
+    """Body for promote-to-existing. The endpoint accepts an empty body
+    for back-compat with the original path-only call, in which case
+    ``capture_ids=None`` (= all KEEP captures) and ``mode='add'``."""
+    capture_ids: Optional[list[int]] = Field(default=None, max_length=64)
+    # 'add'     — append (rejected with 409 at_capacity if it would
+    #              push the employee past MAX_EMBEDDINGS_PER_EMPLOYEE).
+    # 'replace' — wipe every existing embedding for the employee, then
+    #              insert the selected captures. Atomic.
+    mode: str = Field(default="add", pattern=r"^(add|replace)$")
 
 
 class PromoteResponse(BaseModel):
@@ -372,12 +388,22 @@ def promote_to_new_employee(
     user: User = Depends(require_admin),
 ) -> PromoteResponse:
     data = payload.model_dump()
+    # capture_ids is a service-layer arg, not part of the Employee
+    # field set — pull it out so it doesn't end up in the Employee
+    # constructor kwargs as a stray attribute.
+    capture_ids = data.pop("capture_ids", None)
     try:
         outcome = UnknownPromotionService(db).promote_to_new_employee(
-            cluster_id=cluster_id, employee_data=data, created_by=user.id,
+            cluster_id=cluster_id,
+            employee_data=data,
+            capture_ids=capture_ids,
+            created_by=user.id,
         )
     except PromotionError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=_promotion_error_detail(exc),
+        )
     return PromoteResponse(
         cluster_id=outcome.cluster_id,
         employee_id=outcome.employee_id,
@@ -397,15 +423,24 @@ def promote_to_new_employee(
 def promote_to_existing_employee(
     cluster_id: int = PathParam(..., ge=1),
     employee_id: str = PathParam(..., min_length=1),
+    payload: Optional[PromoteToExistingRequest] = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> PromoteResponse:
+    body = payload or PromoteToExistingRequest()
     try:
         outcome = UnknownPromotionService(db).promote_to_existing_employee(
-            cluster_id=cluster_id, employee_id=employee_id, created_by=user.id,
+            cluster_id=cluster_id,
+            employee_id=employee_id,
+            capture_ids=body.capture_ids,
+            mode=body.mode,
+            created_by=user.id,
         )
     except PromotionError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=_promotion_error_detail(exc),
+        )
     return PromoteResponse(
         cluster_id=outcome.cluster_id,
         employee_id=outcome.employee_id,
@@ -416,6 +451,16 @@ def promote_to_existing_employee(
         captures_skipped=outcome.captures_skipped,
         total_employee_embeddings=outcome.total_employee_embeddings,
     )
+
+
+def _promotion_error_detail(exc: PromotionError):
+    """Render a PromotionError as a structured detail dict when it
+    carries a code (so the frontend can switch on the code instead
+    of regex-matching the message). Plain string when no code is set
+    — keeps backward compat for the legacy errors."""
+    if exc.code is None:
+        return str(exc)
+    return {"code": exc.code, "message": str(exc), **exc.extra}
 
 
 @router.post("/api/unknowns/purge", response_model=PurgeResponse)

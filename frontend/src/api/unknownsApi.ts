@@ -8,7 +8,9 @@
 
 import { getAuthToken, signOut } from "@/lib/auth";
 import type {
+  PromoteErrorDetail,
   PromoteResponse,
+  PromoteToExistingPayload,
   PromoteToNewPayload,
   PurgeRequest,
   PurgeResponse,
@@ -17,6 +19,20 @@ import type {
   UnknownClusterListResponse,
   UnknownClusterStatus,
 } from "@/lib/types/unknowns";
+
+/** Typed error raised by promote* helpers when the backend returns a
+ *  structured 4xx detail. Lets the dialog branch on ``code`` without
+ *  regex-matching the message. */
+export class PromoteError extends Error {
+  readonly detail: PromoteErrorDetail;
+  readonly status: number;
+  constructor(detail: PromoteErrorDetail, status: number) {
+    super(detail.message);
+    this.name = "PromoteError";
+    this.detail = detail;
+    this.status = status;
+  }
+}
 
 const API_BASE =
   (import.meta as unknown as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL ??
@@ -125,6 +141,23 @@ export async function discardCluster(clusterId: number): Promise<void> {
   }
 }
 
+async function parsePromoteError(resp: Response, label: string): Promise<never> {
+  let detail: PromoteErrorDetail | string | undefined;
+  try {
+    const body = (await resp.json()) as { detail?: unknown };
+    detail = body?.detail as PromoteErrorDetail | string;
+  } catch {
+    /* not JSON */
+  }
+  // Structured detail (object with code) → typed PromoteError so the
+  // dialog can branch (at_capacity → ask to Retrain, etc.).
+  if (detail && typeof detail === "object" && "code" in detail) {
+    throw new PromoteError(detail as PromoteErrorDetail, resp.status);
+  }
+  const msg = typeof detail === "string" && detail.trim() ? detail : `${label} failed (${resp.status})`;
+  throw new Error(msg);
+}
+
 export async function promoteToNewEmployee(
   clusterId: number,
   payload: PromoteToNewPayload,
@@ -137,20 +170,27 @@ export async function promoteToNewEmployee(
       body: JSON.stringify(payload),
     },
   );
-  return expectJson<PromoteResponse>(resp, "promoteToNewEmployee");
+  if (!resp.ok) return parsePromoteError(resp, "promoteToNewEmployee");
+  return (await resp.json()) as PromoteResponse;
 }
 
 export async function promoteToExistingEmployee(
   clusterId: number,
   employeeId: string,
+  payload: PromoteToExistingPayload = {},
 ): Promise<PromoteResponse> {
   const resp = await authFetch(
     buildUrl(
       `/api/unknowns/clusters/${clusterId}/promote/existing/${encodeURIComponent(employeeId)}`,
     ),
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
   );
-  return expectJson<PromoteResponse>(resp, "promoteToExistingEmployee");
+  if (!resp.ok) return parsePromoteError(resp, "promoteToExistingEmployee");
+  return (await resp.json()) as PromoteResponse;
 }
 
 export async function purgeUnknowns(req: PurgeRequest = {}): Promise<PurgeResponse> {

@@ -73,6 +73,8 @@ export function EditCompaniesPanel() {
   const [resetEyeOn, setResetEyeOn] = useState(false);
   const [resettingBusy, setResettingBusy] = useState(false);
   const [resetConfirmation, setResetConfirmation] = useState<string | null>(null);
+  const [sessionPasswords, setSessionPasswords] = useState<Record<string, string>>({});
+  const [visibleHrPasswords, setVisibleHrPasswords] = useState<Record<string, boolean>>({});
 
   const [deleting, setDeleting] = useState<Company | null>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
@@ -248,6 +250,14 @@ export function EditCompaniesPanel() {
       // either side, and this view is purely client-side memory.
       setResetConfirmation(newPassword);
       setResetEyeOn(true);
+      setSessionPasswords((prev) => ({
+        ...prev,
+        [resettingPassword.hrUserId as string]: newPassword,
+      }));
+      setVisibleHrPasswords((prev) => ({
+        ...prev,
+        [resettingPassword.hrUserId as string]: true,
+      }));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Password reset failed");
     } finally {
@@ -263,6 +273,17 @@ export function EditCompaniesPanel() {
     } catch {
       toast.error("Copy failed — select the text and copy manually");
     }
+  };
+
+  const toggleRowPasswordVisibility = (hrUserId: string) => {
+    if (!sessionPasswords[hrUserId]) {
+      toast.info("Existing password cannot be viewed. Reset it to see the new password once.");
+      return;
+    }
+    setVisibleHrPasswords((prev) => ({
+      ...prev,
+      [hrUserId]: !prev[hrUserId],
+    }));
   };
 
   // --------------------------------------------------------------------
@@ -329,6 +350,7 @@ export function EditCompaniesPanel() {
           <TableBody>
             {companies.map((company, index) => {
               const hasHr = !!company.hrUserId;
+              const hrUserId = company.hrUserId ?? "";
               return (
                 <TableRow key={company.id} className="hover:bg-slate-50/60">
                   <TableCell className="text-slate-500">{index + 1}</TableCell>
@@ -368,13 +390,45 @@ export function EditCompaniesPanel() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {hasHr ? (
-                      <span
-                        className="font-mono text-sm tracking-widest text-slate-700"
-                        title="Stored as a one-way bcrypt hash — use the key icon to set a new password"
-                      >
-                        ••••••••
-                      </span>
+                    {hasHr && company.hrUserId ? (
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="font-mono text-sm tracking-widest text-slate-700"
+                          title="Stored as a one-way bcrypt hash. Only passwords reset in this session can be revealed."
+                        >
+                          {sessionPasswords[hrUserId] &&
+                          visibleHrPasswords[hrUserId]
+                            ? sessionPasswords[hrUserId]
+                            : "••••••••"}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                          onClick={() => toggleRowPasswordVisibility(hrUserId)}
+                          title={
+                            sessionPasswords[hrUserId]
+                              ? visibleHrPasswords[hrUserId]
+                                ? "Hide password"
+                                : "Show password"
+                              : "Existing password can't be revealed. Reset to view the new password once."
+                          }
+                          aria-label={
+                            sessionPasswords[hrUserId]
+                              ? visibleHrPasswords[hrUserId]
+                                ? "Hide password"
+                                : "Show password"
+                              : "Password cannot be revealed"
+                          }
+                        >
+                          {visibleHrPasswords[hrUserId] ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </div>
                     ) : (
                       <span className="text-xs italic text-slate-400">—</span>
                     )}

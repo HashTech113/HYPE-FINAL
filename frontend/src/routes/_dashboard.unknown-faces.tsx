@@ -36,6 +36,11 @@ function UnknownFacesPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteClusterId, setPromoteClusterId] = useState<number | null>(null);
+  // Selected capture ids carried over from the Cluster Detail dialog
+  // when the admin chooses "Add as new employee". The new-employee
+  // payload includes these so the resulting employee is trained on
+  // exactly the admin's selection (not every KEEP capture).
+  const [promoteCaptureIds, setPromoteCaptureIds] = useState<number[]>([]);
 
   const listQuery = useUnknownClusterList({
     status: "PENDING",
@@ -55,8 +60,9 @@ function UnknownFacesPage() {
     setDetailOpen(true);
   }
 
-  function handlePromoteNewRequest(clusterId: number) {
+  function handlePromoteNewRequest(clusterId: number, selectedCaptureIds: number[]) {
     setPromoteClusterId(clusterId);
+    setPromoteCaptureIds(selectedCaptureIds);
     setPromoteOpen(true);
   }
 
@@ -151,18 +157,31 @@ function UnknownFacesPage() {
         open={promoteOpen}
         onOpenChange={(next) => {
           setPromoteOpen(next);
-          if (!next) setPromoteClusterId(null);
+          if (!next) {
+            setPromoteClusterId(null);
+            setPromoteCaptureIds([]);
+          }
         }}
         clusterId={promoteClusterId}
         submitting={promoteNew.isPending}
         onSubmit={(payload) => {
           if (promoteClusterId === null) return;
+          // Inject the admin's capture selection into the payload so
+          // the new employee gets trained on exactly those captures
+          // (not every KEEP capture in the cluster).
+          const withSelection = {
+            ...payload,
+            ...(promoteCaptureIds.length > 0
+              ? { capture_ids: promoteCaptureIds }
+              : {}),
+          };
           promoteNew.mutate(
-            { clusterId: promoteClusterId, payload },
+            { clusterId: promoteClusterId, payload: withSelection },
             {
               onSuccess: () => {
                 setPromoteOpen(false);
                 setPromoteClusterId(null);
+                setPromoteCaptureIds([]);
               },
             },
           );

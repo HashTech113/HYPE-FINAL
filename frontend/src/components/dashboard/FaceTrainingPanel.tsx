@@ -13,6 +13,7 @@ import {
   RefreshCcw,
   ScanFace,
   ScanLine,
+  ShieldCheck,
   Sparkles,
   Trash2,
   XCircle,
@@ -38,7 +39,6 @@ import {
 } from "@/api/dashboardApi";
 import { useEmployees } from "@/contexts/EmployeesContext";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
@@ -154,7 +154,12 @@ type TrainingResult = {
 export function FaceTrainingPanel() {
   const { employees } = useEmployees();
   const [selectedId, setSelectedId] = useState<string>("");
-  const [label, setLabel] = useState<string>("");
+  // Per-image angle label was removed from the UI — the product
+  // direction is to keep the panel simple (employee picker + upload
+  // + train). Any place that used to pass ``label`` to the backend
+  // now sends an empty string; the column stays in the model for
+  // back-compat with rows imported from older flows.
+  const label = "";
   const [images, setImages] = useState<FaceImage[]>([]);
   // Backend-supplied training status — drives the inline status block
   // ("Already Trained" / "Partially Trained" / "Not Trained") and the
@@ -182,6 +187,20 @@ export function FaceTrainingPanel() {
   const [trainingPhase, setTrainingPhase] = useState<TrainingPhase | null>(null);
   const [trainingResult, setTrainingResult] = useState<TrainingResult | null>(null);
   const [retrainBusy, setRetrainBusy] = useState<boolean>(false);
+  // Retrain decision state. For at-cap (6/6) employees the panel
+  // does NOT show the regular upload UI by default — instead it
+  // shows a "Keep Existing / Retrain" decision screen. Clicking
+  // Retrain (with confirmation) flips ``retrainMode`` to true, which
+  // reveals an inline retrain upload panel. Files added in retrain
+  // mode live in ``retrainFiles`` (component-only) and are NOT sent
+  // to the backend until the admin clicks "Submit Retrain", at
+  // which point the full-retrain endpoint atomically replaces the
+  // existing embeddings.
+  const [retrainMode, setRetrainMode] = useState<boolean>(false);
+  const [retrainFiles, setRetrainFiles] = useState<
+    { name: string; dataUrl: string }[]
+  >([]);
+  const [retrainSubmitting, setRetrainSubmitting] = useState<boolean>(false);
   const [capturingBusy, setCapturingBusy] = useState<boolean>(false);
   const [workerStatus, setWorkerStatus] = useState<RecognitionWorkersHealthResponse | null>(null);
   const [workerError, setWorkerError] = useState<string | null>(null);
@@ -236,17 +255,23 @@ export function FaceTrainingPanel() {
   // path), we surface it as an inline notice routing the admin to
   // Retrain rather than prompting for a partial-replace mid-batch.
 
-  // Full-Retrain confirm — same Promise-driven AlertDialog pattern as
-  // the duplicate / capacity prompts. Replaces the previous
-  // ``window.confirm`` (the native dialog clashed visually with the
-  // dark site chrome and looked unbranded).
+  // Retrain confirm — same Promise-driven AlertDialog pattern as the
+  // other prompts. Two entry shapes, distinguished by the ``photoCount``
+  // field:
+  //   * ``photoCount == null`` → "Entering retrain mode" from the
+  //     at-cap decision screen. No files have been picked yet, so the
+  //     copy must NOT promise a specific number of new embeddings —
+  //     just describe what Retrain WILL do once the admin adds photos.
+  //   * ``photoCount`` is a number → Partial-trained one-shot flow
+  //     (admin picked files via the destructive file picker). Copy
+  //     can name the exact image count being committed.
   const [retrainConfirm, setRetrainConfirm] = useState<{
     employeeName: string;
-    photoCount: number;
+    photoCount: number | null;
     resolve: (proceed: boolean) => void;
   } | null>(null);
   const askRetrainConfirm = useCallback(
-    (employeeName: string, photoCount: number) =>
+    (employeeName: string, photoCount: number | null) =>
       new Promise<boolean>((resolve) => {
         setRetrainConfirm({ employeeName, photoCount, resolve });
       }),
@@ -378,6 +403,12 @@ export function FaceTrainingPanel() {
       setImages([]);
       setTrainingStatus(null);
     }
+    // Always reset the in-flight retrain session when the selected
+    // employee changes — half-staged retrain files belong to whoever
+    // was selected at the time and should not bleed across people.
+    setRetrainMode(false);
+    setRetrainFiles([]);
+    setRetrainSubmitting(false);
   }, [selectedId, loadImages]);
 
   useEffect(() => {
@@ -619,6 +650,202 @@ export function FaceTrainingPanel() {
     }
   };
 
+  // ---- Retrain mode handlers (at-cap decision flow) ---------------
+  //
+  // Differs from ``handleFullRetrain`` below: that one is a one-shot
+  // file-picker → confirm → POST flow used by the partial-trained
+  // optional Retrain. The handlers below drive the multi-step retrain
+  // *mode* for already-fully-trained employees:
+  //   1. enterRetrainMode  — admin clicked Retrain on the decision
+  //                          screen and confirmed the warning.
+  //   2. addRetrainPhotos  — file picker output is read + cropped
+  //                          + appended to ``retrainFiles`` in
+  //                          component state. Nothing hits the
+  //                          backend yet.
+  //   3. removeRetrainPhoto / cancelRetrain — admin housekeeping.
+  //   4. submitRetrain     — admin clicked Submit. Sends the in-
+  //                          memory ``retrainFiles`` to the atomic
+  //                          full-retrain endpoint. Backend
+  //                          validates the whole batch up-front and
+  //                          only deletes the old embeddings if the
+  //                          new ones are accepted.
+  // Inline retrain confirmation. When true, the left panel renders
+  // a confirmation card (replacing the Already Trained decision
+  // view) with Cancel / Continue to upload image buttons. Replaces
+  // the earlier modal AlertDialog so the confirmation flow lives
+  // in the same panel space as the rest of the workflow.
+  const [pendingRetrainConfirm, setPendingRetrainConfirm] = useState<boolean>(false);
+
+  // Arm the file-picker auto-open. When set, the effect below fires
+  // ``retrainInputRef.current.click()`` as soon as ``retrainMode``
+  // flips true and the hidden input mounts — so "Continue to upload
+  // image" lands the admin straight in the OS file picker without a
+  // second click on Re-upload Image.
+  const autoOpenRetrainPickerRef = useRef<boolean>(false);
+
+  const startRetrainFlow = useCallback(() => {
+    if (!selectedId) return;
+    setPendingRetrainConfirm(true);
+    setNotice(null);
+  }, [selectedId]);
+
+  const cancelRetrainConfirm = () => {
+    autoOpenRetrainPickerRef.current = false;
+    setPendingRetrainConfirm(false);
+  };
+
+  const confirmRetrainStart = () => {
+    // Continue to upload image — flip retrain mode AND arm the
+    // auto-open so the file picker opens as soon as the hidden
+    // retrain input renders. One click → file picker, no extra UI
+    // step in between.
+    autoOpenRetrainPickerRef.current = true;
+    setPendingRetrainConfirm(false);
+    setRetrainMode(true);
+    setRetrainFiles([]);
+  };
+
+  // Fires the retrain file picker click once the input has mounted
+  // (it only renders when ``retrainMode`` is true). setTimeout(0)
+  // defers until after the next paint so the ref is populated.
+  useEffect(() => {
+    if (retrainMode && autoOpenRetrainPickerRef.current) {
+      autoOpenRetrainPickerRef.current = false;
+      const t = window.setTimeout(() => {
+        retrainInputRef.current?.click();
+      }, 0);
+      return () => window.clearTimeout(t);
+    }
+  }, [retrainMode]);
+
+  // Reset the inline confirm if the admin switches employees mid-flow.
+  useEffect(() => {
+    setPendingRetrainConfirm(false);
+  }, [selectedId]);
+
+  // Top-right action button handler. Routes by current state:
+  //   * not trained         → open the upload picker directly
+  //   * trained, idle       → open the inline retrain confirmation
+  //   * already in retrain  → open the retrain picker directly
+  const handleTopUploadClick = () => {
+    if (!selectedId) return;
+    const trained =
+      trainingStatus !== null && trainingStatus.embeddingsCount > 0;
+    if (retrainMode) {
+      retrainInputRef.current?.click();
+      return;
+    }
+    if (trained) {
+      startRetrainFlow();
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const addRetrainPhotos = async (files: FileList | null) => {
+    if (!files || !selectedId) return;
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    // Hard-cap at the per-employee max — the admin can deselect to
+    // make room if they exceed it.
+    const slotsLeft = Math.max(0, maxRecommended - retrainFiles.length);
+    if (slotsLeft === 0) {
+      showNotice("warn", `Maximum ${maxRecommended} photos for retraining. Remove one first.`);
+      return;
+    }
+    const accepted = list.slice(0, slotsLeft);
+    if (accepted.length < list.length) {
+      showNotice(
+        "info",
+        `Only the first ${accepted.length} image(s) added — retrain accepts at most ${maxRecommended}.`,
+      );
+    }
+    // Crop step per file. Same flow as the regular upload path; the
+    // admin can crop, use original, or skip individual files.
+    for (let i = 0; i < accepted.length; i++) {
+      const file = accepted[i];
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        const original = await readFileAsDataUrl(file);
+        const choice = await askForCrop(original, file.name, i + 1, accepted.length);
+        if (choice === "cancel") continue;
+        const dataUrl = choice === "original" ? original : choice;
+        setRetrainFiles((prev) => [...prev, { name: file.name, dataUrl }]);
+      } catch (err) {
+        showNotice("error", err instanceof Error ? err.message : "Could not read image");
+      }
+    }
+  };
+
+  const removeRetrainPhoto = (idx: number) => {
+    setRetrainFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const cancelRetrain = () => {
+    setRetrainMode(false);
+    setRetrainFiles([]);
+    setRetrainSubmitting(false);
+    setNotice(null);
+  };
+
+  const submitRetrain = async () => {
+    if (!selectedId) return;
+    if (retrainFiles.length < minRequired) {
+      showNotice(
+        "warn",
+        `Add at least ${minRequired} clear photos before submitting the retrain.`,
+      );
+      return;
+    }
+    if (retrainFiles.length > maxRecommended) {
+      showNotice("warn", `Retrain accepts at most ${maxRecommended} photos.`);
+      return;
+    }
+    setRetrainSubmitting(true);
+    try {
+      // Run the same scanning → detecting → embedding → training
+      // phase animation that the initial Train Face flow uses, so
+      // the admin sees the pipeline progress instead of staring at
+      // a frozen panel during the (potentially several-second)
+      // atomic retrain. The animation runs in parallel with the
+      // API call; whichever finishes last decides when we proceed.
+      const apiPromise = fullRetrainFaceImages(
+        selectedId,
+        retrainFiles.map((f) => ({ image: f.dataUrl, label: label.trim() })),
+      );
+      await runTrainingAnimation(apiPromise);
+      const summary = await apiPromise;
+      setImages(summary.items);
+      setTrainingStatus(summary.training);
+      // Capture the employee's name BEFORE clearing the selection so
+      // the success toast can still address them by name even after
+      // the picker resets.
+      const empName = selectedEmployee?.name ?? "this employee";
+      showSuccess(
+        `Retraining completed successfully for ${empName} — previous ` +
+        "images replaced and new face training images stored successfully.",
+      );
+      // Leave retrain mode AND return to the initial section state
+      // (no employee selected) so the admin can pick the next person
+      // right away. The success toast keeps showing for ~3s so the
+      // confirmation is still visible during the reset.
+      setRetrainMode(false);
+      setRetrainFiles([]);
+      setSelectedId("");
+    } catch (error) {
+      if (error instanceof BadImageError) {
+        showNotice("error", error.message);
+      } else {
+        showNotice("error", error instanceof Error ? error.message : "Retrain failed");
+      }
+    } finally {
+      setRetrainSubmitting(false);
+      // Clear the phase indicator in case animation finished while
+      // the API was still in flight (or vice versa).
+      setTrainingPhase(null);
+    }
+  };
+
   // Full Retrain — destructive: deletes every existing embedding for
   // the selected employee and replaces them with a fresh batch of
   // photos. Backend validates the entire batch up front and rejects
@@ -751,70 +978,138 @@ export function FaceTrainingPanel() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_auto]">
-        <div className="space-y-1.5">
-          <Label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Employee — Company
-          </Label>
-          <SearchableSelect
-            value={selectedId}
-            options={employeeOptions}
-            onValueChange={setSelectedId}
-            placeholder="Search by name or company…"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Angle label (optional)
-          </Label>
-          <Input
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="front / left / right"
-            maxLength={64}
-            disabled={!selectedId}
-          />
-        </div>
-        {/* Single upload action — Upload images is the only entry
-            point for adding photos. The Retrain primary CTA (right
-            sidebar) is the destructive replace-all path; the old
-            separate "Full Retrain" button was confusing alongside it
-            and has been folded into the single Retrain action. */}
-        <div className="flex items-end gap-2">
-          <Button
-            type="button"
-            disabled={!selectedId || uploading || remainingSlots === 0}
-            onClick={() => fileInputRef.current?.click()}
-            className="h-10 gap-1.5"
+      {(() => {
+        // Any trained employee (>= 1 embedding) gets the
+        // Keep/Retrain decision screen — uploads are NOT allowed
+        // until the admin explicitly enters retrain mode. So we
+        // hide both the Angle Label input and the Upload button
+        // slot whenever the selected employee has at least one
+        // embedding and isn't in retrain mode. Avoids the broken-
+        // looking half-row of inputs above the "Already Trained"
+        // card.
+        const trainedDecisionMode =
+          trainingStatus !== null &&
+          trainingStatus.embeddingsCount > 0 &&
+          !retrainMode;
+        const atCapDecision = trainedDecisionMode;
+        return (
+          <div
+            className={cn(
+              "grid grid-cols-1 gap-3",
+              // Always two-column when an employee is selected — the
+              // top-right slot now hosts a button in every state
+              // (Upload Image / Re-upload Image / Re-upload Image
+              // with staged count during retrain).
+              "md:grid-cols-[minmax(0,1fr)_320px]",
+            )}
           >
-            <ImagePlus className="h-4 w-4" />
-            {uploading
-              ? "Uploading…"
-              : remainingSlots === 0
-                ? "Max reached"
-                : `Upload images (${remainingSlots} left)`}
-          </Button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => void handleFiles(e.target.files)}
-          />
-          {/* Retrain file picker is hidden; the primary CTA in the
-              right sidebar opens it when the employee is already
-              trained. */}
-          <input
-            ref={retrainInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => void handleFullRetrain(e.target.files)}
-          />
-        </div>
-      </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Employee — Company
+              </Label>
+              <SearchableSelect
+                value={selectedId}
+                options={employeeOptions}
+                onValueChange={setSelectedId}
+                placeholder="Search by name or company…"
+              />
+            </div>
+            {/* Action stack — button is ALWAYS visible while an
+                employee is selected. Label/behavior switches by state:
+                  * not trained         → "Upload Image" → file picker
+                  * trained (not yet
+                    in retrain mode)    → "Re-upload Image" (amber) →
+                                          inline retrain confirm
+                  * in retrain mode     → "Re-upload Image (N/6)"
+                                          (amber) → file picker, so
+                                          the admin can add more
+                                          photos any time without
+                                          leaving the panel. */}
+            <div className="flex items-end gap-2">
+              {(() => {
+                const trained =
+                  trainingStatus !== null &&
+                  trainingStatus.embeddingsCount > 0;
+                const showRetrainLabel = trained || retrainMode;
+                const atRetrainCap =
+                  retrainMode && retrainFiles.length >= maxRecommended;
+                let label: string;
+                if (retrainMode) {
+                  label = atRetrainCap
+                    ? "Max reached"
+                    : `Re-upload Image (${retrainFiles.length}/${maxRecommended})`;
+                } else if (trained) {
+                  label = "Re-upload Image";
+                } else if (uploading) {
+                  label = "Uploading…";
+                } else if (remainingSlots === 0) {
+                  label = "Max reached";
+                } else {
+                  label = "Upload Image";
+                }
+                const disabled =
+                  !selectedId ||
+                  retrainSubmitting ||
+                  (retrainMode && atRetrainCap) ||
+                  (!trained && !retrainMode && (uploading || remainingSlots === 0));
+                return (
+                  <Button
+                    type="button"
+                    disabled={disabled}
+                    onClick={handleTopUploadClick}
+                    className={cn(
+                      "h-10 w-full gap-1.5",
+                      // Amber for both retrain-entry and active
+                      // retrain mode so the colour reads as
+                      // "destructive replace" throughout the flow.
+                      showRetrainLabel &&
+                        "bg-amber-600 text-white shadow-sm hover:bg-amber-700",
+                    )}
+                  >
+                    {showRetrainLabel ? (
+                      <RefreshCcw className="h-4 w-4" />
+                    ) : (
+                      <ImagePlus className="h-4 w-4" />
+                    )}
+                    {label}
+                  </Button>
+                );
+              })()}
+              {/* Hidden file inputs — mounted at all times so
+                  ``retrainInputRef.current`` is non-null when the
+                  auto-open effect fires right after the admin clicks
+                  "Continue to upload image". Without this the click
+                  would land on a null ref and the picker would never
+                  open, leaving the admin staring at an empty retrain
+                  panel waiting for files. */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => void handleFiles(e.target.files)}
+              />
+              <input
+                ref={retrainInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (retrainMode) {
+                    void addRetrainPhotos(files);
+                    e.target.value = "";
+                  } else {
+                    void handleFullRetrain(files);
+                  }
+                }}
+              />
+            </div>
+          </div>
+        );
+      })()}
 
       {loadError ? (
         <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm text-rose-700">
@@ -839,7 +1134,15 @@ export function FaceTrainingPanel() {
               <TrainingInlinePanel
                 phase={trainingPhase}
                 employeeName={selectedEmployee?.name ?? ""}
-                imageThumbnails={images.slice(0, 6).map((i) => i.imageUrl)}
+                // During retrain the source photos are the staged
+                // ``retrainFiles`` (not yet on the backend), so the
+                // strip should reflect those. Falls back to ``images``
+                // for the initial Train Face animation.
+                imageThumbnails={
+                  retrainMode
+                    ? retrainFiles.slice(0, 6).map((f) => f.dataUrl)
+                    : images.slice(0, 6).map((i) => i.imageUrl)
+                }
               />
             </div>
           ) : trainingResult !== null ? (
@@ -849,17 +1152,161 @@ export function FaceTrainingPanel() {
                 onDismiss={() => setTrainingResult(null)}
               />
             </div>
+          ) : pendingRetrainConfirm && selectedId ? (
+            // Inline retrain confirmation — replaces the modal that
+            // used to pop up over the panel. Sits where the Already
+            // Trained decision card would normally be, so the admin
+            // stays in one visual context throughout the flow.
+            <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-rose-200 bg-rose-50/40 p-6 text-center">
+              <RefreshCcw className="mb-3 h-10 w-10 text-rose-600" />
+              <div className="text-base font-semibold text-rose-900">
+                Retrain this employee?
+              </div>
+              <p className="mt-3 max-w-md text-sm text-slate-700">
+                Retraining will update the existing face training images
+                for{" "}
+                <span className="font-semibold text-slate-900">
+                  {selectedEmployee?.name ?? "this employee"}
+                </span>
+                . The current trained images will remain unchanged until
+                the new images are uploaded and validated successfully.
+              </p>
+              <p className="mt-2 max-w-md text-xs leading-relaxed text-slate-500">
+                If validation fails, the existing trained face data will
+                be preserved without any changes.
+              </p>
+              <div className="mt-5 flex w-full max-w-md flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={cancelRetrainConfirm}
+                  className="h-10 flex-1 gap-2 border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={confirmRetrainStart}
+                  className="h-10 flex-1 gap-2 bg-rose-600 text-sm font-medium text-white shadow-sm hover:bg-rose-700"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" />
+                  Continue to upload image
+                </Button>
+              </div>
+            </div>
+          ) : retrainMode ? (
+            // Retrain upload mode — admin confirmed the warning. We
+            // now reuse the SAME image grid layout as the regular
+            // upload flow so the UX reads identical: thumbnails on
+            // the left, primary action (Retrain Face) on the right
+            // sidebar. The staged files live in ``retrainFiles``
+            // (component-only); the backend isn't called until the
+            // sidebar Retrain Face button is clicked.
+            retrainFiles.length === 0 ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-10 text-center text-sm text-muted-foreground">
+                <ImagePlus className="h-8 w-8 text-slate-400" />
+                <div className="font-medium text-slate-700">No new images yet</div>
+                <div className="max-w-sm text-xs">
+                  Click <strong>Re-upload Image</strong> above to add{" "}
+                  {minRequired}–{maxRecommended} new photos, then click{" "}
+                  <strong>Retrain Face</strong> on the right.
+                </div>
+              </div>
+            ) : (
+              <div
+                className={cn(
+                  "grid h-full min-h-0 grid-cols-3 gap-3",
+                  retrainFiles.length <= 3
+                    ? "place-content-center"
+                    : "grid-rows-2",
+                )}
+              >
+                {retrainFiles.map((f, idx) => (
+                  <div
+                    key={`${f.name}-${idx}`}
+                    className={cn(
+                      "group relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white",
+                      retrainFiles.length <= 3 && "aspect-square",
+                    )}
+                  >
+                    <div className="relative min-h-0 flex-1 bg-slate-100">
+                      <img
+                        src={f.dataUrl}
+                        alt={f.name || "Retrain photo"}
+                        className="absolute inset-0 h-full w-full object-contain"
+                        loading="lazy"
+                      />
+                    </div>
+                    <div className="flex shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 text-xs">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-slate-700">
+                          {f.name || "(no name)"}
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-destructive hover:bg-rose-50 hover:text-destructive"
+                        onClick={() => removeRetrainPhoto(idx)}
+                        disabled={retrainSubmitting}
+                        title="Remove photo"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
           ) : loading ? (
             <div className="flex flex-1 items-center justify-center py-8 text-center text-sm text-muted-foreground">
               Loading…
             </div>
+          ) : trainingStatus !== null &&
+            trainingStatus.embeddingsCount > 0 &&
+            selectedId ? (
+            // Already-trained DECISION view — fires for ANY
+            // employee with one or more embeddings (1/6, 3/6, 6/6
+            // — same UX). Admin must explicitly choose Keep
+            // Existing or Retrain before any upload UI is surfaced.
+            // This is the "never show upload directly for trained"
+            // contract from the product spec.
+            <AlreadyTrainedDecisionInlinePanel
+              employeeName={selectedEmployee?.name ?? ""}
+              embeddingsCount={trainingStatus.embeddingsCount}
+              minRequired={minRequired}
+              maxRecommended={maxRecommended}
+              existingImages={images}
+              onKeepExisting={() => {
+                // Show the confirmation toast and reset back to the
+                // initial "Pick an employee" state so the admin can
+                // immediately move on to the next person without
+                // having to clear the search box manually. The toast
+                // has its own ~3s lifetime so the message is still
+                // visible after the panel resets.
+                showSuccess("Existing training kept — no changes made.");
+                setSelectedId("");
+              }}
+            />
           ) : images.length === 0 && selectedId ? (
-            <div className="flex flex-1 items-center justify-center py-8 text-center text-sm text-muted-foreground">
-              No face images yet. Upload one or more to build a reference set.
+            // Reaches here ONLY when the employee has zero
+            // embeddings AND no pending image rows. The decision
+            // panel above already swallowed every trained case, so
+            // this is the genuine "fresh / never trained" empty
+            // state — prompt for the first upload with the spec's
+            // exact 3-to-6 wording so the admin knows the target
+            // range up front.
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-10 text-center text-sm text-muted-foreground">
+              <ImagePlus className="h-8 w-8 text-slate-400" />
+              <div className="font-medium text-slate-700">No face images yet</div>
+              <div className="max-w-sm text-xs">
+                Upload 3 to 6 clear face images (front / left / right) to build
+                a reference set, then click Train on the right.
+              </div>
             </div>
           ) : !selectedId ? (
             <div className="flex flex-1 items-center justify-center py-8 text-center text-sm text-muted-foreground">
-              Pick an employee above to view or add their face training images.
+              Select an employee above to view, upload, or update face training images for accurate face recognition management.
             </div>
           ) : (
             // Layout adapts to image count so a sparse set doesn't
@@ -930,7 +1377,7 @@ export function FaceTrainingPanel() {
         {/* RIGHT — status / recommendations at the top, Train CTA pinned
             to the bottom so the action sits at the natural focus point
             and the column visually anchors to the section's lower edge. */}
-        <aside className="flex min-h-0 flex-col gap-3">
+        <aside className="flex min-h-0 flex-col gap-4">
           {selectedEmployee ? (
             <TrainingStatusCard
               employeeName={selectedEmployee.name}
@@ -938,17 +1385,15 @@ export function FaceTrainingPanel() {
               status={trainingStatus}
               minRequired={minRequired}
               maxRecommended={maxRecommended}
+              retrainMode={retrainMode}
+              stagedCount={retrainFiles.length}
             />
-          ) : (
-            <div className="rounded-xl border border-dashed border-slate-300 bg-white px-3.5 py-6 text-center text-sm text-muted-foreground">
-              Pick an employee above.
-            </div>
-          )}
+          ) : null}
 
           {selectedId ? (
             <div className="rounded-xl border border-sky-100 bg-sky-50/60 px-3.5 py-2.5 text-xs text-sky-800">
               <div className="mb-1 font-semibold">Recommended angles</div>
-              <ul className="list-inside list-disc space-y-0.5">
+              <ul className="grid list-inside list-disc grid-cols-2 gap-x-3 gap-y-0.5">
                 <li>Front view</li>
                 <li>Eye view</li>
                 <li>Top view</li>
@@ -970,66 +1415,138 @@ export function FaceTrainingPanel() {
               so there's no awkward blank gap. Hidden while training or
               success owns the left slot so the section reads as one
               focused state. */}
-          {trainingPhase === null && trainingResult === null ? (
-            <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3">
-              <div className="flex items-start gap-2 text-xs text-slate-600">
-                <ScanFace className="h-4 w-4 shrink-0 text-primary" />
+          {/* Retrain entry card — shown on the right sidebar bottom
+              for already-trained employees who are NOT yet in
+              retrain mode. Pairs visually with the Re-upload Image
+              button on the top-right (top = upload, bottom =
+              train). Primary action goes through the same confirm
+              dialog as the top button, just doesn't pre-arm the
+              file picker (admin clicks Retrain in the panel that
+              opens). */}
+          {trainingStatus !== null &&
+          trainingStatus.embeddingsCount > 0 &&
+          !retrainMode &&
+          !pendingRetrainConfirm &&
+          trainingPhase === null &&
+          trainingResult === null ? (
+            <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex items-start gap-2 text-xs leading-relaxed text-slate-600">
+                <RefreshCcw className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                 <span>
-                  Train using multiple angles for maximum recognition accuracy
-                  on connected cameras.
+                  Replace this employee&apos;s existing face data with new
+                  images. Old embeddings are removed only after the new
+                  images pass validation.
                 </span>
               </div>
-              {/* Primary CTA: three states keyed off what's in the
-                  grid + the backend trained status.
-                    • images present     → Train (commit pending photos,
-                                            then post-train cleanup
-                                            clears image_data so they
-                                            stop showing as pending)
-                    • no images, trained → Retrain (destructive replace)
-                    • no images, not yet → Train Face (disabled until min)
-
-                  Rationale: after upload, the admin sees their photos
-                  in the grid and expects a Train button to finalize.
-                  Routing them to Retrain in that moment would be both
-                  destructive AND counter-intuitive — embeddings were
-                  already created inline; "Retrain" should only mean
-                  the explicit start-over flow. */}
-              {images.length > 0 ? (
-                <Button
-                  type="button"
-                  size="lg"
-                  onClick={() => void handleTrain()}
-                  disabled={!selectedId || trainingPhase !== null}
-                  className="mt-auto h-12 w-full gap-2 text-base font-semibold"
-                >
-                  <Sparkles className="h-5 w-5" />
-                  Train
-                </Button>
-              ) : trainingStatus?.status === "trained" ||
-                trainingStatus?.status === "over_cap" ? (
-                <Button
-                  type="button"
-                  size="lg"
-                  onClick={() => retrainInputRef.current?.click()}
-                  disabled={!selectedId || retrainBusy}
-                  className="mt-auto h-12 w-full gap-2 bg-amber-600 text-base font-semibold text-white hover:bg-amber-700"
-                >
-                  <RefreshCcw className={cn("h-5 w-5", retrainBusy && "animate-spin")} />
-                  {retrainBusy ? "Retraining…" : "Retrain"}
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  size="lg"
-                  onClick={() => void handleTrain()}
-                  disabled={trainDisabled}
-                  className="mt-auto h-12 w-full gap-2 text-base font-semibold"
-                >
-                  <Sparkles className="h-5 w-5" />
-                  Train Face
-                </Button>
-              )}
+              <Button
+                type="button"
+                onClick={startRetrainFlow}
+                disabled={!selectedId}
+                className="h-10 w-full gap-2 rounded-lg bg-amber-600 text-sm font-medium text-white shadow-sm hover:bg-amber-700"
+              >
+                <RefreshCcw className="h-3.5 w-3.5" />
+                Retrain
+              </Button>
             </div>
+          ) : null}
+
+          {/* Retrain action card — single primary CTA. The
+              Re-upload Image button lives in the TOP-RIGHT slot
+              (always visible during retrain mode) so the admin can
+              re-trigger the file picker without coming all the way
+              down here. This card just holds Retrain Face + the
+              Cancel link. */}
+          {retrainMode ? (
+            <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex items-start gap-2 text-xs leading-relaxed text-slate-600">
+                <ScanFace className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                <span>
+                  Add {minRequired}–{maxRecommended} new photos via{" "}
+                  <strong>Re-upload Image</strong> above, then click{" "}
+                  <strong>Retrain Face</strong>. The existing set is
+                  preserved if any image fails validation.
+                </span>
+              </div>
+              <Button
+                type="button"
+                onClick={() => void submitRetrain()}
+                disabled={
+                  retrainSubmitting || retrainFiles.length < minRequired
+                }
+                className="h-10 w-full gap-2 rounded-lg text-sm font-medium shadow-sm"
+              >
+                {retrainSubmitting ? (
+                  <>
+                    <RefreshCcw className="h-3.5 w-3.5 animate-spin" />
+                    Retraining…
+                  </>
+                ) : (
+                  <>
+                    <RefreshCcw className="h-3.5 w-3.5" />
+                    Retrain Face
+                  </>
+                )}
+              </Button>
+              <button
+                type="button"
+                onClick={cancelRetrain}
+                disabled={retrainSubmitting}
+                className="text-center text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-slate-700 hover:underline disabled:opacity-50"
+              >
+                Cancel retrain
+              </button>
+            </div>
+          ) : null}
+
+          {trainingPhase === null && trainingResult === null && !retrainMode &&
+            !(trainingStatus !== null && trainingStatus.embeddingsCount > 0) ? (
+            // Action card. Hidden in three states that own their
+            // actions elsewhere:
+            //   * retrainMode      → submit/cancel live inside the
+            //                         inline retrain panel
+            //   * trained (any 1+) → Keep Existing / Retrain live
+            //                         inside the decision panel
+            //   * (post-trained editing happens via Retrain flow)
+            //
+            // What remains: the untrained (0 embeddings) path. Admin
+            // uploads via the top "Upload images" button and then
+            // clicks Train Face here once they have enough pending
+            // images. No Retrain branch — there's nothing to retrain.
+            (() => {
+              const hasPending = images.length > 0;
+              const helperText = hasPending
+                ? "Click Train to finalize the new images and add them to this employee's trained set."
+                : "Upload photos above, then Train. Use multiple angles (front / left / right) for the best recognition accuracy.";
+              return (
+                <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="flex items-start gap-2 text-xs leading-relaxed text-slate-600">
+                    <ScanFace className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <span>{helperText}</span>
+                  </div>
+                  {hasPending ? (
+                    <Button
+                      type="button"
+                      onClick={() => void handleTrain()}
+                      disabled={!selectedId || trainingPhase !== null}
+                      className="h-10 w-full gap-2 rounded-lg text-sm font-medium shadow-sm"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Train
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={() => void handleTrain()}
+                      disabled={trainDisabled}
+                      className="h-10 w-full gap-2 rounded-lg text-sm font-medium shadow-sm"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Train Face
+                    </Button>
+                  )}
+                </div>
+              );
+            })()
           ) : null}
         </aside>
       </div>
@@ -1171,23 +1688,37 @@ export function FaceTrainingPanel() {
                 </AlertDialogTitle>
                 <AlertDialogDescription asChild>
                   <div className="space-y-2 text-sm text-slate-600">
-                    <p>
-                      Retraining will <strong className="text-rose-600">remove</strong>{" "}
-                      the old face embeddings for{" "}
-                      <span className="font-semibold text-slate-900">
-                        {retrainConfirm.employeeName}
-                      </span>{" "}
-                      and train them with the{" "}
-                      <span className="font-semibold text-slate-900 tabular-nums">
-                        {retrainConfirm.photoCount}
-                      </span>{" "}
-                      new image{retrainConfirm.photoCount === 1 ? "" : "s"} you selected. Continue?
-                    </p>
+                    {retrainConfirm.photoCount === null ? (
+                      <p>
+                        Retraining will update the existing face
+                        training images for{" "}
+                        <span className="font-semibold text-slate-900">
+                          {retrainConfirm.employeeName}
+                        </span>
+                        . The current trained images will remain
+                        unchanged until the new images are uploaded and
+                        validated successfully.
+                      </p>
+                    ) : (
+                      <p>
+                        Retraining will update the existing face
+                        training images for{" "}
+                        <span className="font-semibold text-slate-900">
+                          {retrainConfirm.employeeName}
+                        </span>
+                        . The current trained images will remain
+                        unchanged until the{" "}
+                        <span className="font-semibold text-slate-900 tabular-nums">
+                          {retrainConfirm.photoCount}
+                        </span>{" "}
+                        uploaded image
+                        {retrainConfirm.photoCount === 1 ? "" : "s"} are
+                        validated successfully.
+                      </p>
+                    )}
                     <p className="text-xs text-slate-500">
-                      Safe replace: the new images are validated and
-                      embeddings are staged <em>before</em> the old set is
-                      removed. If validation fails, the existing trained
-                      faces stay exactly as they were.
+                      If validation fails, the existing trained face
+                      data will be preserved without any changes.
                     </p>
                   </div>
                 </AlertDialogDescription>
@@ -1200,7 +1731,7 @@ export function FaceTrainingPanel() {
                   onClick={() => handleRetrainConfirm(true)}
                   className="bg-rose-600 text-white hover:bg-rose-700"
                 >
-                  Retrain
+                  {retrainConfirm.photoCount === null ? "Continue Retraining" : "Retrain"}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </>
@@ -1306,25 +1837,208 @@ export function FaceTrainingPanel() {
 // view, and the success view based on training state.
 // -----------------------------------------------------------------------------
 
+function TrainedStatusInlinePanel({
+  embeddingsCount,
+  minRequired,
+  maxRecommended,
+}: {
+  embeddingsCount: number;
+  minRequired: number;
+  maxRecommended: number;
+}) {
+  // Three states this component handles (at-cap === maxRecommended is
+  // owned by AlreadyTrainedDecisionInlinePanel and never reaches here):
+  //   * 0                  → "No face images yet"  (untrained)
+  //   * 1..minRequired-1   → "Partially Trained"   (need more)
+  //   * minRequired..max-1 → "Already Trained"     (under cap, can add more)
+  //
+  // The whole point of this branch is that visible face_images can be
+  // empty (image_data cleared post-train) while the employee is still
+  // trained — keying status off embeddings makes the panel honest.
+
+  // ── Untrained ────────────────────────────────────────────────────
+  if (embeddingsCount <= 0) {
+    return (
+      <div className="flex flex-1 items-center justify-center py-8 text-center text-sm text-muted-foreground">
+        No face images yet. Upload one or more to build a reference set.
+      </div>
+    );
+  }
+
+  const isPartial = embeddingsCount < minRequired;
+  const Icon = isPartial ? AlertTriangle : BadgeCheck;
+  const title = isPartial ? "Partially Trained" : "Already Trained";
+  const message = isPartial
+    ? "Upload more clear face images to complete training."
+    : `This employee is trained. You can add more angles up to ${maxRecommended} if needed.`;
+
+  return (
+    <div
+      className={cn(
+        "flex h-full w-full flex-col items-center justify-center rounded-xl border p-6 text-center",
+        isPartial
+          ? "border-amber-200 bg-amber-50/40"
+          : "border-emerald-200 bg-emerald-50/40",
+      )}
+    >
+      <Icon
+        className={cn(
+          "mb-3 h-10 w-10",
+          isPartial ? "text-amber-600" : "text-emerald-600",
+        )}
+      />
+      <div
+        className={cn(
+          "text-base font-semibold",
+          isPartial ? "text-amber-900" : "text-emerald-900",
+        )}
+      >
+        {title}
+      </div>
+      <div className="mt-1 text-xs font-medium text-slate-700">
+        Embeddings:{" "}
+        <span className="tabular-nums">
+          {embeddingsCount} / {maxRecommended}
+        </span>{" "}
+        · min <span className="tabular-nums">{minRequired}</span>
+      </div>
+      <p
+        className={cn(
+          "mt-3 max-w-sm text-xs leading-relaxed",
+          isPartial ? "text-amber-900/80" : "text-emerald-900/80",
+        )}
+      >
+        {message}
+      </p>
+    </div>
+  );
+}
+
+function AlreadyTrainedDecisionInlinePanel({
+  employeeName,
+  embeddingsCount,
+  minRequired,
+  maxRecommended,
+  existingImages,
+  onKeepExisting,
+}: {
+  employeeName: string;
+  embeddingsCount: number;
+  minRequired: number;
+  maxRecommended: number;
+  // Source training images that still carry their inline base64
+  // payload (older records may have had image_data purged before the
+  // policy change — those rows are filtered out by list_for_employee
+  // and don't appear here). Shown as a small thumbnail strip so the
+  // admin can SEE what's actually trained, not just a count.
+  existingImages: FaceImage[];
+  // Retrain action moved to the right-sidebar action card (lives
+  // beside Re-upload Image on top), so this panel no longer needs
+  // its own Retrain button — Keep Existing is the only left-side
+  // action.
+  onKeepExisting: () => void;
+}) {
+  const hasThumbs = existingImages.length > 0;
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50/40 p-6 text-center">
+      <ShieldCheck className="mb-3 h-10 w-10 text-emerald-600" />
+      <div className="text-base font-semibold text-emerald-900">
+        Already Trained
+      </div>
+
+      {/* Spec status line: "Embeddings: X / 6 · min 3" */}
+      <div className="mt-2 text-sm font-medium text-slate-700">
+        Embeddings:{" "}
+        <span className="tabular-nums">
+          {embeddingsCount} / {maxRecommended}
+        </span>{" "}
+        · min <span className="tabular-nums">{minRequired}</span>
+      </div>
+
+      <p className="mt-3 max-w-md text-sm text-slate-700">
+        <span className="font-semibold text-slate-900">{employeeName}</span>{" "}
+        already has trained face data. If you want to replace it, click{" "}
+        <strong>Retrain</strong> first.
+      </p>
+
+      {/* Existing trained images. Only renders when we actually have
+          source images on file — for legacy rows whose image_data was
+          purged before the policy change, we fall through to a small
+          informational stub instead of leaving a blank gap. */}
+      {hasThumbs ? (
+        <div className="mt-4 w-full max-w-md">
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-800/80">
+            Existing trained images
+          </div>
+          <div className="flex flex-wrap justify-center gap-1.5">
+            {existingImages.slice(0, maxRecommended).map((img) => (
+              <div
+                key={img.id}
+                className="h-14 w-14 overflow-hidden rounded-md border border-emerald-200 bg-white"
+              >
+                <img
+                  src={img.imageUrl}
+                  alt={img.label || "Trained face"}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Keep Existing only. The Retrain action lives on the right
+          sidebar's action card so the layout mirrors the untrained
+          flow: top-right upload, bottom-right primary action. */}
+      <div className="mt-5 flex w-full max-w-xs justify-center">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={onKeepExisting}
+          className="h-10 w-full gap-2 border-emerald-300 bg-white text-sm font-medium text-emerald-800 hover:bg-emerald-100"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Keep Existing
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function TrainingStatusCard({
   employeeName,
   company,
   status,
   minRequired,
   maxRecommended,
+  retrainMode = false,
+  stagedCount = 0,
 }: {
   employeeName: string;
   company?: string;
   status: FaceTrainingStatus | null;
   minRequired: number;
   maxRecommended: number;
+  // Client-side overrides for the in-flight retrain session — the
+  // backend's ``trainingStatus`` still reflects the OLD embedding
+  // set during retrain (nothing is committed until Submit), but the
+  // sidebar should signal the active mode so left and right stay
+  // visually consistent. ``stagedCount`` is the number of photos
+  // the admin has dropped into the retrain panel so far.
+  retrainMode?: boolean;
+  stagedCount?: number;
 }) {
   // Visual variant per status. Drives the badge color, the body
   // copy, and (for the over_cap legacy state) a clarifying line so
-  // ops know the cap is now backend-enforced.
+  // ops know the cap is now backend-enforced. Retrain mode takes
+  // precedence over the backend status — when the admin has chosen
+  // to retrain, the existing trained-ness is informational only.
   const count = status?.embeddingsCount ?? 0;
   const variant: { label: string; tone: string; iconCls: string; Icon: typeof BadgeCheck } =
-    status?.status === "trained"
+    retrainMode
+      ? { label: "Retrain Mode", tone: "border-amber-200 bg-amber-50 text-amber-900", iconCls: "text-amber-600", Icon: RefreshCcw }
+      : status?.status === "trained"
       ? { label: "Already Trained", tone: "border-emerald-200 bg-emerald-50 text-emerald-800", iconCls: "text-emerald-600", Icon: BadgeCheck }
       : status?.status === "partial"
       ? { label: "Partially Trained", tone: "border-amber-200 bg-amber-50 text-amber-900", iconCls: "text-amber-600", Icon: AlertTriangle }
@@ -1340,40 +2054,37 @@ function TrainingStatusCard({
         <Icon className={cn("h-3.5 w-3.5", variant.iconCls)} />
         {variant.label}
       </div>
-      <div className="mt-1 text-xs">
-        Embeddings:{" "}
-        <span className="font-semibold tabular-nums">
-          {count} / {maxRecommended}
-        </span>
-        {" · min "}
-        <span className="tabular-nums">{minRequired}</span>
-      </div>
-      {status?.status === "trained" && count >= maxRecommended ? (
-        // At-capacity (fully trained) wording — distinct from the
-        // generic "trained" copy. Tells the admin Add Face is gated
-        // and Retrain is the only path to change the face set.
-        <div className="mt-1 text-[11px] leading-snug text-emerald-700/80">
-          This employee is already fully trained with {count} face embedding
-          {count === 1 ? "" : "s"}. Use <strong>Retrain</strong> to replace the
-          existing face data with new images.
+      {retrainMode ? (
+        // Show the staged-count progress instead of the (still-
+        // unchanged) existing embeddings count, so the admin can
+        // see at a glance how close they are to having enough
+        // photos to Train.
+        <div className="mt-1 text-xs">
+          Staged:{" "}
+          <span className="font-semibold tabular-nums">
+            {stagedCount} / {maxRecommended}
+          </span>
+          {" · min "}
+          <span className="tabular-nums">{minRequired}</span>
         </div>
-      ) : status?.status === "trained" ? (
-        <div className="mt-1 text-[11px] leading-snug text-emerald-700/80">
-          This employee is already trained with {count} face embedding
-          {count === 1 ? "" : "s"}. Add more angles up to {maxRecommended}, or
-          Retrain to replace the existing set.
+      ) : (
+        <div className="mt-1 text-xs">
+          Embeddings:{" "}
+          <span className="font-semibold tabular-nums">
+            {count} / {maxRecommended}
+          </span>
+          {" · min "}
+          <span className="tabular-nums">{minRequired}</span>
         </div>
-      ) : status?.status === "partial" ? (
-        <div className="mt-1 text-[11px] leading-snug">
-          Need {minRequired - count} more clear photo
-          {minRequired - count === 1 ? "" : "s"} to train.
-        </div>
-      ) : status?.status === "over_cap" ? (
-        <div className="mt-1 text-[11px] leading-snug">
-          Cap is now {maxRecommended}. New uploads will be rejected — use
-          Retrain to start fresh.
-        </div>
-      ) : null}
+      )}
+      {/* Long descriptive paragraphs intentionally removed here —
+          the inline panel on the left (TrainedStatusInlinePanel /
+          AlreadyTrainedDecisionInlinePanel) already carries the
+          full message, and the action card below has a contextual
+          one-liner above the button. Repeating it in this card just
+          duplicated text and pushed the Train button down the
+          sidebar. The status badge + count above is the essential
+          signal at-a-glance. */}
     </div>
   );
 }

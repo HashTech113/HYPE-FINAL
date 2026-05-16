@@ -51,6 +51,7 @@ from ..models import (
     UnknownFaceCluster,
 )
 from .embedding_cache import get_embedding_cache
+from .face_training import MAX_EMBEDDINGS_PER_EMPLOYEE
 from .lookups import (
     get_or_create_company_id,
     get_or_create_department_id,
@@ -63,11 +64,22 @@ log = logging.getLogger(__name__)
 
 class PromotionError(RuntimeError):
     """Raised when a cluster can't be promoted. The router translates this
-    into the appropriate HTTP status."""
+    into the appropriate HTTP status. ``code`` is the structured error
+    code (e.g. 'at_capacity', 'too_many_images') that the frontend
+    matches against — keeps the UI from string-matching the message."""
 
-    def __init__(self, message: str, *, status_code: int = 400) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 400,
+        code: Optional[str] = None,
+        extra: Optional[dict] = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+        self.extra = extra or {}
 
 
 @dataclass(frozen=True)
@@ -95,9 +107,20 @@ class UnknownPromotionService:
         *,
         cluster_id: int,
         employee_data: dict,
+        capture_ids: Optional[list[int]] = None,
         created_by: Optional[str] = None,
     ) -> PromoteOutcome:
         cluster = self._load_promotable(cluster_id)
+        # Bound the request size at the per-employee cap. New employee
+        # path is always mode='add' (there are no existing embeddings to
+        # replace), so > MAX is unambiguously wrong.
+        if capture_ids is not None and len(capture_ids) > MAX_EMBEDDINGS_PER_EMPLOYEE:
+            raise PromotionError(
+                f"Cannot promote more than {MAX_EMBEDDINGS_PER_EMPLOYEE} captures.",
+                status_code=422,
+                code="too_many_images",
+                extra={"max": MAX_EMBEDDINGS_PER_EMPLOYEE, "selected": len(capture_ids)},
+            )
 
         supplied_code = (employee_data.get("employee_code") or "").strip() or None
         code = supplied_code if supplied_code else self._next_employee_code()
@@ -151,7 +174,8 @@ class UnknownPromotionService:
         self.db.flush()
 
         promoted, skipped = self._migrate_captures(
-            cluster=cluster, employee=employee, created_by=created_by,
+            cluster=cluster, employee=employee,
+            capture_ids=capture_ids, created_by=created_by,
         )
         self._finalize_cluster(cluster, employee_id=employee.id)
 
@@ -182,8 +206,31 @@ class UnknownPromotionService:
         *,
         cluster_id: int,
         employee_id: str,
+        capture_ids: Optional[list[int]] = None,
+        mode: str = "add",
         created_by: Optional[str] = None,
     ) -> PromoteOutcome:
+        """Add the selected cluster captures to an existing employee.
+
+        ``mode='add'``     — appends. Rejects with 409 ``at_capacity``
+                             when the new total would exceed
+                             :data:`MAX_EMBEDDINGS_PER_EMPLOYEE`. The
+                             admin's selection isn't truncated; the
+                             frontend is expected to either trim the
+                             selection or re-submit with ``mode='replace'``.
+        ``mode='replace'`` — wipes every existing embedding for this
+                             employee first, then inserts the selected
+                             ones. Atomic: the deletes share the same
+                             transaction as the inserts, so any
+                             mid-flight failure rolls back to the
+                             pre-call state (old embeddings preserved).
+        """
+        if mode not in ("add", "replace"):
+            raise PromotionError(
+                f"Invalid mode '{mode}', expected 'add' or 'replace'",
+                status_code=422, code="invalid_mode",
+            )
+
         cluster = self._load_promotable(cluster_id)
         employee = self.db.get(Employee, employee_id)
         if employee is None:
@@ -191,8 +238,64 @@ class UnknownPromotionService:
         if not employee.is_active:
             raise PromotionError("Cannot promote into an inactive employee")
 
+        # Selection size guard (applies to both modes).
+        selected_count = len(capture_ids) if capture_ids is not None else None
+        if selected_count is not None and selected_count > MAX_EMBEDDINGS_PER_EMPLOYEE:
+            raise PromotionError(
+                f"Cannot promote more than {MAX_EMBEDDINGS_PER_EMPLOYEE} captures.",
+                status_code=422, code="too_many_images",
+                extra={"max": MAX_EMBEDDINGS_PER_EMPLOYEE, "selected": selected_count},
+            )
+
+        # Capacity check (mode='add' only — replace wipes first so the
+        # final count is just the new selection).
+        if mode == "add":
+            current = int(
+                self.db.execute(
+                    select(func.count(FaceEmbedding.id)).where(
+                        FaceEmbedding.employee_id == employee.id
+                    )
+                ).scalar_one()
+            )
+            # Use the explicit selection size when provided; otherwise
+            # fall back to the cluster's KEEP count so legacy callers
+            # that pass capture_ids=None still get cap protection.
+            incoming = selected_count if selected_count is not None else self._count_keep_captures(cluster.id)
+            if current + incoming > MAX_EMBEDDINGS_PER_EMPLOYEE:
+                raise PromotionError(
+                    f"Employee already has {current} embeddings — adding "
+                    f"{incoming} more would exceed the cap of "
+                    f"{MAX_EMBEDDINGS_PER_EMPLOYEE}. Use Retrain to replace "
+                    f"the existing set.",
+                    status_code=409, code="at_capacity",
+                    extra={
+                        "embeddings_count": current,
+                        "incoming": incoming,
+                        "max_recommended": MAX_EMBEDDINGS_PER_EMPLOYEE,
+                    },
+                )
+
+        # mode='replace' → delete first, in the SAME db session so any
+        # mid-flight failure rolls back together with the inserts.
+        deleted = 0
+        if mode == "replace":
+            old = self.db.execute(
+                select(FaceEmbedding).where(
+                    FaceEmbedding.employee_id == employee.id
+                )
+            ).scalars().all()
+            for e in old:
+                self.db.delete(e)
+            deleted = len(old)
+            self.db.flush()
+            log.info(
+                "promote(replace): wiped %d existing embedding(s) for emp=%s before insert",
+                deleted, employee.id,
+            )
+
         promoted, skipped = self._migrate_captures(
-            cluster=cluster, employee=employee, created_by=created_by,
+            cluster=cluster, employee=employee,
+            capture_ids=capture_ids, created_by=created_by,
         )
         if promoted == 0:
             raise PromotionError(
@@ -209,8 +312,10 @@ class UnknownPromotionService:
             ).scalar_one()
         )
         log.info(
-            "Promoted cluster=%s -> EXISTING employee=%s code=%s promoted=%d skipped=%d",
-            cluster.id, employee.id, employee.employee_code, promoted, skipped,
+            "Promoted cluster=%s -> EXISTING employee=%s code=%s mode=%s "
+            "promoted=%d skipped=%d deleted_old=%d total_now=%d",
+            cluster.id, employee.id, employee.employee_code, mode,
+            promoted, skipped, deleted, total,
         )
         return PromoteOutcome(
             cluster_id=cluster.id,
@@ -221,6 +326,18 @@ class UnknownPromotionService:
             captures_promoted=promoted,
             captures_skipped=skipped,
             total_employee_embeddings=total,
+        )
+
+    def _count_keep_captures(self, cluster_id: int) -> int:
+        return int(
+            self.db.execute(
+                select(func.count(UnknownFaceCapture.id)).where(
+                    and_(
+                        UnknownFaceCapture.cluster_id == cluster_id,
+                        UnknownFaceCapture.status == UnknownCaptureStatus.KEEP,
+                    )
+                )
+            ).scalar_one()
         )
 
     # ------------------------------------------------------------------
@@ -265,15 +382,23 @@ class UnknownPromotionService:
         *,
         cluster: UnknownFaceCluster,
         employee: Employee,
+        capture_ids: Optional[list[int]],
         created_by: Optional[str],
     ) -> tuple[int, int]:
-        """Copy the cluster's quality-ranked KEEP captures into the employee's
-        training images. Reuses each capture's stored embedding verbatim.
+        """Copy KEEP captures into the employee's training images. Reuses
+        each capture's stored embedding verbatim (already produced by
+        the same buffalo_l pipeline live recognition uses).
 
-        Returns ``(promoted, skipped)``. Skip reasons: file missing on disk,
-        unreadable, or embedding shape mismatch.
+        ``capture_ids`` filters the migration to a specific subset of
+        the cluster's KEEP captures — the admin-selected set from the
+        Cluster Detail dialog. Each requested id MUST belong to this
+        cluster AND still be in KEEP status; mismatches raise so the
+        admin sees a clear error instead of a silent partial promote.
+
+        Returns ``(promoted, skipped)``. Skip reasons: file missing on
+        disk, unreadable, or capture id not eligible for this cluster.
         """
-        captures = self.db.execute(
+        base_q = (
             select(UnknownFaceCapture)
             .where(
                 and_(
@@ -285,9 +410,28 @@ class UnknownPromotionService:
                 UnknownFaceCapture.det_score.desc(),
                 UnknownFaceCapture.sharpness_score.desc(),
             )
-        ).scalars().all()
-        if not captures:
+        )
+        all_captures = self.db.execute(base_q).scalars().all()
+        if not all_captures:
             return 0, 0
+
+        if capture_ids is None:
+            captures = all_captures
+        else:
+            wanted = set(int(i) for i in capture_ids)
+            captures = [c for c in all_captures if int(c.id) in wanted]
+            # Surface mismatched ids as a hard error — a missing id
+            # usually means the admin's UI is out of date or someone
+            # discarded a capture between selection and submit.
+            missing = wanted - {int(c.id) for c in captures}
+            if missing:
+                raise PromotionError(
+                    f"Selected captures not found or not eligible: {sorted(missing)}",
+                    status_code=422, code="invalid_capture_ids",
+                    extra={"missing_ids": sorted(missing)},
+                )
+            if not captures:
+                return 0, 0
 
         promoted = 0
         skipped = 0
